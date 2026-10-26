@@ -188,6 +188,9 @@ struct Panel: View {
         }
         .padding(12)
         .frame(width: 640, height: 680)
+        // A menu bar app's panel never becomes the key window on its own, so text fields ignore typing and paste
+        // until the app is activated. Do it on every open; Esc or a click outside still closes the panel.
+        .onAppear { NSApp.activate(ignoringOtherApps: true) }
     }
 
     var header: some View {
