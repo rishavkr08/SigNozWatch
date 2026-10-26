@@ -204,23 +204,25 @@ struct Panel: View {
     }
 
     var header: some View {
-        HStack(spacing: 8) {
-            Text("SigNozWatch").font(.system(size: 13, weight: .semibold))
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                Text("SigNozWatch").font(.system(size: 13, weight: .semibold))
+                Spacer()
+                if model.fetching {
+                    ProgressView().controlSize(.small)
+                } else if model.snap.date > .distantPast {
+                    (Text("updated ") + Text(model.snap.date, style: .relative) + Text(" ago")).font(.caption).foregroundStyle(.secondary)
+                }
+                Button { model.tick() } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(.plain).help("Refresh now")
+                Button("Open SigNoz") { model.open("/") }.buttonStyle(.link).font(.callout)
+            }
             Picker("", selection: Binding(get: { current }, set: { tab = $0 })) {
                 ForEach(tabs, id: \.self) { t in
                     let n = model.categories.first { $0.0 == t }?.1.filter { $0.sev != .ok }.count ?? (t == "Alerts" ? model.firing.count : 0)
                     Text(n > 0 ? "\(t) (\(n))" : t).tag(t)
                 }
             }
-            .pickerStyle(.segmented).labelsHidden().fixedSize()
-            Spacer()
-            if model.fetching {
-                ProgressView().controlSize(.small)
-            } else if model.snap.date > .distantPast {
-                (Text("updated ") + Text(model.snap.date, style: .relative) + Text(" ago")).font(.caption).foregroundStyle(.secondary)
-            }
-            Button { model.tick() } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(.plain).help("Refresh now")
-            Button("Open SigNoz") { model.open("/") }.buttonStyle(.link).font(.callout)
+            .pickerStyle(.segmented).labelsHidden()
         }
     }
 
