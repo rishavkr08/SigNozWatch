@@ -127,7 +127,8 @@ func notifyTest() -> Never {
         case .notDetermined: name = "NOT DETERMINED: macOS has not shown the permission prompt yet, or it was dismissed"
         @unknown default: name = "unknown"
         }
-        print("permission: \(name); alerts \(s.alertSetting == .enabled ? "on" : "off"), banners \(s.alertStyle == .none ? "off" : "on"), sound \(s.soundSetting == .enabled ? "on" : "off")")
+        let style = s.alertStyle == .alert ? "Alerts (stay until dismissed)" : s.alertStyle == .banner ? "Banners (vanish after a few seconds; pick Alerts in System Settings › Notifications › SigNozWatch to keep them)" : "none"
+        print("permission: \(name); style \(style); sound \(s.soundSetting == .enabled ? "on" : "off")")
     }
     a.check([], firing: [Alert(id: "test", name: "SigNozWatch test notification", severity: "warning", env: "", state: "firing",
                                  detail: "If you can read this, notifications work. Click to open SigNoz.", text: "")], Thresholds())
