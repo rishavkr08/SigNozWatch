@@ -380,7 +380,7 @@ struct MachineRings: View {
     func ring(_ title: String, _ value: Double, of full: Double, limit: Double, text: String) -> some View {
         let sev = limit.isFinite ? severity(value, over: limit) : .ok
         return VStack(spacing: 4) {
-            Ring(fraction: value / max(full, 0.001), color: sev == .ok ? Color.secondary.opacity(0.6) : sev.color, text: text, textColor: sev.textColor)
+            Ring(fraction: value / max(full, 0.001), color: sev.color, text: text, textColor: sev.textColor)
             Text(title).font(.caption2).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
