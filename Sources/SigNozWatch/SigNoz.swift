@@ -4,13 +4,18 @@ import Foundation
 
 /// SigNoz endpoint and API key, kept in UserDefaults. Never in the source, never committed.
 struct Config {
-    var url = "", key = ""
-    var base: String { url.hasSuffix("/") ? String(url.dropLast()) : url }
+    var url = "", key = ""         // SigNoz
+    var gURL = "", gKey = ""       // Grafana (optional second source), service-account token
+    var base: String { trim(url) }
+    var gBase: String { trim(gURL) }
     var isSet: Bool { !url.isEmpty && !key.isEmpty }
+    var grafanaSet: Bool { !gURL.isEmpty && !gKey.isEmpty }
+    private func trim(_ u: String) -> String { u.hasSuffix("/") ? String(u.dropLast()) : u }
 
     static func load() -> Config {
         let d = UserDefaults.standard
-        var c = Config(url: d.string(forKey: "signozURL") ?? "", key: d.string(forKey: "signozKey") ?? "")
+        var c = Config(url: d.string(forKey: "signozURL") ?? "", key: d.string(forKey: "signozKey") ?? "",
+                       gURL: d.string(forKey: "grafanaURL") ?? "", gKey: d.string(forKey: "grafanaKey") ?? "")
         if !c.isSet, let mcp = fromClaudeMCP() {   // first run: borrow the SigNoz MCP server's settings
             c = mcp
             d.set(c.url, forKey: "signozURL")
@@ -31,13 +36,15 @@ struct Config {
 }
 
 struct Thresholds {
-    var errPct = 5.0, p99Ms = 2000.0, cpuPct = 90.0, memPct = 90.0, cooldownMin = 30.0, pollSec = 60.0
-    static let defaults: [String: Any] = ["errPct": 5.0, "p99Ms": 2000.0, "cpuPct": 90.0, "memPct": 90.0, "cooldownMin": 30.0, "pollSec": 60.0]
+    var errPct = 5.0, p99Ms = 2000.0, cpuPct = 90.0, memPct = 90.0, diskPct = 90.0, loadPerCore = 1.5, staleSec = 120.0, cooldownMin = 30.0, pollSec = 60.0
+    static let defaults: [String: Any] = ["errPct": 5.0, "p99Ms": 2000.0, "cpuPct": 90.0, "memPct": 90.0, "diskPct": 90.0, "loadPerCore": 1.5,
+                                          "staleSec": 120.0, "cooldownMin": 30.0, "pollSec": 60.0]
     static func load() -> Thresholds {
         let d = UserDefaults.standard
         d.register(defaults: defaults)   // here, not only in Model.init, so --once and --check see the same limits
         return Thresholds(errPct: d.double(forKey: "errPct"), p99Ms: d.double(forKey: "p99Ms"), cpuPct: d.double(forKey: "cpuPct"),
-                          memPct: d.double(forKey: "memPct"), cooldownMin: d.double(forKey: "cooldownMin"), pollSec: max(d.double(forKey: "pollSec"), 15))
+                          memPct: d.double(forKey: "memPct"), diskPct: d.double(forKey: "diskPct"), loadPerCore: d.double(forKey: "loadPerCore"),
+                          staleSec: d.double(forKey: "staleSec"), cooldownMin: d.double(forKey: "cooldownMin"), pollSec: max(d.double(forKey: "pollSec"), 15))
     }
 }
 
@@ -54,15 +61,19 @@ struct Server: Identifiable {
     var id: String { kind == .service ? "service:\(service)@\(name)" : "host:\(name)" }
     // service, over the window
     var callRate = 0.0, numCalls = 0, numErrors = 0, errorPct = 0.0, p99Ms = 0.0
-    // host
+    // host (SigNoz infra agent, or Grafana's Prometheus node exporter)
     var cpuPct = 0.0, memPct = 0.0, load15 = 0.0, os = ""
+    var diskPct = 0.0, loadPerCore = 0.0, staleSec = 0.0   // Grafana only
     var active = true     // host still sending metrics
     var missing = false   // seen on an earlier poll, absent now
+    var link = ""         // absolute URL for rows that live outside SigNoz
 
+    /// Relative to the SigNoz base, unless `link` is set.
     var path: String {
+        if !link.isEmpty { return link }
         switch kind {
-        case .service: "/services/" + (service.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? service)
-        case .host: "/infrastructure-monitoring/hosts"
+        case .service: return "/services/" + (service.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? service)
+        case .host: return "/infrastructure-monitoring/hosts"
         }
     }
 }
@@ -105,8 +116,11 @@ func health(_ s: Server, _ t: Thresholds, alerts: [Alert]) -> Health {
         if s.numCalls == 0 { parts.append((.warn, "no traffic in \(windowMinutes) min")) }
     case .host:
         if !s.active { parts.append((.bad, "no metrics")) }
+        if s.staleSec > 0 { parts.append((severity(s.staleSec, over: t.staleSec), "no data for \(Int(s.staleSec / 60)) min")) }
         parts.append((severity(s.cpuPct, over: t.cpuPct), "CPU \(Int(s.cpuPct))%"))
         parts.append((severity(s.memPct, over: t.memPct), "memory \(Int(s.memPct))%"))
+        if s.diskPct > 0 { parts.append((severity(s.diskPct, over: t.diskPct), "disk \(Int(s.diskPct))% full")) }
+        if s.loadPerCore > 0 { parts.append((severity(s.loadPerCore, over: t.loadPerCore), "load \(fmt(s.loadPerCore)) per core")) }
     }
     parts += alerts.filter { $0.firing && $0.matches(s) }.map { ($0.sev, $0.name) }
     let worst = parts.map(\.0).max() ?? .ok
@@ -179,6 +193,17 @@ enum Parse {
         }
     }
 
+    /// Prometheus instant-query vector → (labels, value) pairs.
+    static func prometheus(_ data: Data) throws -> [(labels: [String: String], value: Double)] {
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = (root["data"] as? [String: Any])?["result"] as? [[String: Any]] else { throw APIError(message: "prometheus: unexpected JSON") }
+        return result.compactMap { r in
+            guard let labels = r["metric"] as? [String: String], let v = (r["value"] as? [Any])?.last else { return nil }
+            let value = (v as? NSNumber)?.doubleValue ?? Double(v as? String ?? "") ?? .nan
+            return value.isNaN ? nil : (labels, value)
+        }
+    }
+
     /// GET /api/v1/rules → every rule with its state; the condition is kept as text for name matching.
     static func rules(_ data: Data) throws -> [Alert] {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -246,6 +271,80 @@ struct SigNozClient {
         guard code == 200 else {
             let hint = code == 401 || code == 403 ? "API key rejected" : String(decoding: data.prefix(120), as: UTF8.self)
             throw APIError(message: "\(r.url?.path ?? "") → HTTP \(code): \(hint)")
+        }
+        return data
+    }
+}
+
+// MARK: - Grafana (Prometheus through the datasource proxy)
+
+/// Node-exporter queries, by (instance, server); `server` is Alloy's short name. `stale` catches a host that stopped pushing
+/// while its `up` series still reads 1. These match the "Infra — Fleet Overview" dashboard.
+let prometheusQueries: [String: String] = [
+    "cpu": #"100 - avg by (instance, server)(rate(node_cpu_seconds_total{job="integrations/unix",mode="idle"}[5m])) * 100"#,
+    "mem": #"max by (instance, server)((1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100)"#,
+    "disk": #"max by (instance, server)((1 - node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}) * 100)"#,
+    "load": #"sum by (instance, server)(node_load1) / count by (instance, server)(count by (instance, server, cpu)(node_cpu_seconds_total{mode="idle"}))"#,
+    "stale": #"time() - max by (instance, server)(timestamp(up{job="integrations/unix"}))"#,
+]
+
+/// One host row per instance from the five query results.
+func mergeHosts(_ results: [String: [(labels: [String: String], value: Double)]], link: String) -> [Server] {
+    var hosts: [String: Server] = [:]
+    for (metric, rows) in results {
+        for r in rows {
+            guard let instance = r.labels["instance"] else { continue }
+            var h = hosts[instance] ?? Server(kind: .host, name: instance, os: (r.labels["server"].map { "\($0) · " } ?? "") + "Grafana", link: link)
+            switch metric {
+            case "cpu": h.cpuPct = r.value
+            case "mem": h.memPct = r.value
+            case "disk": h.diskPct = r.value
+            case "load": h.loadPerCore = r.value
+            case "stale": h.staleSec = max(r.value, 0)
+            default: break
+            }
+            hosts[instance] = h
+        }
+    }
+    return hosts.values.sorted { $0.name < $1.name }
+}
+
+struct GrafanaClient {
+    let config: Config
+
+    func hosts() async throws -> [Server] {
+        let uid = try await datasourceUID()
+        var results: [String: [(labels: [String: String], value: Double)]] = [:]
+        try await withThrowingTaskGroup(of: (String, Data).self) { group in
+            for (name, expr) in prometheusQueries {
+                group.addTask {
+                    let q = expr.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? expr
+                    return (name, try await send("/api/datasources/proxy/uid/\(uid)/api/v1/query?query=\(q)"))
+                }
+            }
+            for try await (name, data) in group { results[name] = try Parse.prometheus(data) }
+        }
+        return mergeHosts(results, link: config.gBase + "/d/infra-fleet")
+    }
+
+    /// The first Prometheus datasource, looked up once and remembered.
+    func datasourceUID() async throws -> String {
+        if let uid = UserDefaults.standard.string(forKey: "grafanaDS"), !uid.isEmpty { return uid }
+        guard let list = try JSONSerialization.jsonObject(with: try await send("/api/datasources")) as? [[String: Any]],
+              let uid = list.first(where: { $0["type"] as? String == "prometheus" })?["uid"] as? String
+        else { throw APIError(message: "Grafana has no Prometheus datasource") }
+        UserDefaults.standard.set(uid, forKey: "grafanaDS")
+        return uid
+    }
+
+    private func send(_ path: String) async throws -> Data {
+        var r = URLRequest(url: URL(string: config.gBase + path) ?? URL(fileURLWithPath: "/"), timeoutInterval: 20)
+        r.setValue("Bearer " + config.gKey, forHTTPHeaderField: "Authorization")
+        let (data, resp) = try await URLSession.shared.data(for: r)
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        guard code == 200 else {
+            let hint = code == 401 || code == 403 ? "token rejected" : String(decoding: data.prefix(120), as: UTF8.self)
+            throw APIError(message: "Grafana \(path.prefix(40)) → HTTP \(code): \(hint)")
         }
         return data
     }

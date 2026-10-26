@@ -52,6 +52,24 @@ func selfCheck() {
           && merged[3].kind == .host && merged[3].name == "old-box", "known servers missing from the poll are kept as missing")
     check(health(merged[3], t, alerts: []).sev == .bad, "missing server is red")
 
+    let prom = Data(#"""
+    {"status":"success","data":{"resultType":"vector","result":[{"metric":{"instance":"thrillophilia-admin-server","server":"admin-ui"},"value":[1793017000.1,"100.0"]},
+     {"metric":{"instance":"thrillo-prod-redis-server","server":"redis"},"value":[1793017000.1,"3.4"]}]}}
+    """#.utf8)
+    guard let pv = try? Parse.prometheus(prom) else { check(false, "prometheus parse threw"); return }
+    check(pv.count == 2 && pv[0].labels["server"] == "admin-ui" && pv[0].value == 100 && pv[1].value == 3.4, "prometheus vector parse (string values)")
+    check((try? Parse.prometheus(rules)) == nil, "prometheus parser rejects the wrong shape")
+    let one = { (v: Double) in [(labels: ["instance": "thrillophilia-admin-server", "server": "admin-ui"], value: v)] }
+    let gh = mergeHosts(["cpu": pv, "mem": one(20), "disk": one(95), "load": one(2.06), "stale": one(400)], link: "https://g.example/d/infra-fleet")
+    check(gh.count == 2 && gh[0].name == "thrillo-prod-redis-server" && gh[0].cpuPct == 3.4 && gh[0].diskPct == 0, "hosts merged per instance, sorted by name")
+    let admin = gh[1]
+    check(admin.os == "admin-ui · Grafana" && admin.memPct == 20 && admin.diskPct == 95 && admin.loadPerCore == 2.06 && admin.staleSec == 400
+          && admin.id == "host:thrillophilia-admin-server" && admin.path == "https://g.example/d/infra-fleet", "merged host fields and link")
+    check(health(admin, t, alerts: []).why == "no data for 6 min · CPU 100% · disk 95% full · load 2.1 per core", "stale, CPU, disk and load all red")
+    var warmHost = gh[0]; warmHost.loadPerCore = 1.3; warmHost.diskPct = 75
+    check(health(warmHost, t, alerts: []).why == "disk 75% full · load 1.3 per core", "80% of the disk and load limits is orange")
+    check(Config(url: "https://s", key: "k").grafanaSet == false && Config(url: "https://s", key: "k", gURL: "https://g/", gKey: "t").gBase == "https://g", "grafana config")
+
     check(labelText(unhealthy: 0, hasData: true, error: nil) == "OK", "label when all healthy")
     check(labelText(unhealthy: 2, hasData: true, error: "x") == "2", "label shows the count even when the last poll failed")
     check(labelText(unhealthy: 0, hasData: false, error: "x") == "?", "label before any data")

@@ -34,6 +34,7 @@ final class Model: ObservableObject {
     @Published var events: [AlertEvent] = []
     @Published var hist: [String: [Double]] = [:]   // server id → error % (services) or CPU % (hosts)
     @Published var known: [String] = UserDefaults.standard.stringArray(forKey: "knownServers") ?? []
+    private var lastSigNoz: [Server] = [], lastGrafana: [Server] = [], lastAlerts: [Alert] = []   // last good answer per source
     let alerter = Alerter()
     private var timer: Timer?
 
@@ -67,25 +68,28 @@ final class Model: ObservableObject {
 
     func tick() { Task { await refresh() } }
 
+    /// Each source fails on its own: a bad Grafana token must not blank the SigNoz rows or mark them missing.
     func refresh() async {
         let c = Config.load()
         guard c.isSet else { snap.error = "Set the SigNoz URL and API key under Settings"; return }
         if fetching { return }
         fetching = true
         defer { fetching = false }
-        do {
-            let (fresh, alerts) = try await SigNozClient(config: c).fetch()
-            known = Array(Set(known).union(fresh.map(\.id))).sorted()
-            UserDefaults.standard.set(known, forKey: "knownServers")
-            snap = Snapshot(servers: merge(fresh, known: known), alerts: alerts, date: Date(), error: nil)
-            for s in fresh {
-                hist[s.id, default: []].append(s.kind == .service ? s.errorPct : s.cpuPct)
-                if hist[s.id]!.count > historySamples { hist[s.id]!.removeFirst() }
-            }
-            alerter.check(rows, firing: firing, thresholds)
-        } catch {
-            snap.error = error.localizedDescription   // keep the last good list on screen
+        let signoz = Task { try await SigNozClient(config: c).fetch() }
+        let grafana = Task { c.grafanaSet ? try await GrafanaClient(config: c).hosts() : [] }
+        var errors: [String] = []
+        do { let r = try await signoz.value; lastSigNoz = r.servers; lastAlerts = r.alerts } catch { errors.append("SigNoz: \(error.localizedDescription)") }
+        do { lastGrafana = try await grafana.value } catch { errors.append("Grafana: \(error.localizedDescription)") }
+        if errors.count == 2 && snap.servers.isEmpty { snap.error = errors.joined(separator: "\n"); return }
+        let fresh = lastSigNoz.filter { s in !lastGrafana.contains { $0.id == s.id } } + lastGrafana   // same host in both: Grafana has more
+        known = Array(Set(known).union(fresh.map(\.id))).sorted()
+        UserDefaults.standard.set(known, forKey: "knownServers")
+        snap = Snapshot(servers: merge(fresh, known: known), alerts: lastAlerts, date: Date(), error: errors.isEmpty ? nil : errors.joined(separator: "\n"))
+        for s in fresh {
+            hist[s.id, default: []].append(s.kind == .service ? s.errorPct : s.cpuPct)
+            if hist[s.id]!.count > historySamples { hist[s.id]!.removeFirst() }
         }
+        alerter.check(rows, firing: firing, thresholds)
     }
 
     func forget(_ id: String) {
@@ -95,7 +99,7 @@ final class Model: ObservableObject {
     }
 
     func open(_ path: String) {
-        if let u = URL(string: Config.load().base + path) { NSWorkspace.shared.open(u) }
+        if let u = URL(string: path.hasPrefix("http") ? path : Config.load().base + path) { NSWorkspace.shared.open(u) }
     }
 }
 
@@ -125,12 +129,14 @@ func pollOnce() -> Never {
     Task {
         let c = Config.load()
         do {
-            let (servers, alerts) = try await SigNozClient(config: c).fetch()
+            var (servers, alerts) = try await SigNozClient(config: c).fetch()
+            if c.grafanaSet { servers += try await GrafanaClient(config: c).hosts() } else { print("Grafana: not configured") }
             for s in servers {
                 let h = health(s, .load(), alerts: alerts)
                 print("\(h.sev) \(s.kind.rawValue) \(s.name)" + (s.service.isEmpty ? "" : " (\(s.service), \(s.env))") + ": " + (s.kind == .service
                     ? "\(fmt(s.callRate))/s, \(s.numErrors) errors (\(fmt(s.errorPct))%), p99 \(fmtMs(s.p99Ms))"
-                    : "cpu \(Int(s.cpuPct))%, mem \(Int(s.memPct))%, load15 \(fmt(s.load15))") + (h.why.isEmpty ? "" : " — \(h.why)"))
+                    : "cpu \(Int(s.cpuPct))%, mem \(Int(s.memPct))%, disk \(Int(s.diskPct))%, load/core \(fmt(s.loadPerCore)), load15 \(fmt(s.load15)), stale \(Int(s.staleSec))s [\(s.os)]")
+                    + (h.why.isEmpty ? "" : " — \(h.why)"))
             }
             for a in alerts { print("\(a.state) alert (\(a.severity)): \(a.name)") }
         } catch { print("error: \(error.localizedDescription)") }
@@ -150,6 +156,11 @@ struct Panel: View {
     @AppStorage("p99Ms") private var p99Ms = 2000.0
     @AppStorage("cpuPct") private var cpuPct = 90.0
     @AppStorage("memPct") private var memPct = 90.0
+    @AppStorage("diskPct") private var diskPct = 90.0
+    @AppStorage("loadPerCore") private var loadPerCore = 1.5
+    @AppStorage("staleSec") private var staleSec = 120.0
+    @AppStorage("grafanaURL") private var grafanaURL = ""
+    @AppStorage("grafanaKey") private var grafanaKey = ""
     @AppStorage("cooldownMin") private var cooldownMin = 30.0
     @AppStorage("pollSec") private var pollSec = 60.0
     @State private var showSettings = false
@@ -176,7 +187,7 @@ struct Panel: View {
             footer
         }
         .padding(12)
-        .frame(width: 600, height: 660)
+        .frame(width: 640, height: 680)
     }
 
     var header: some View {
@@ -201,11 +212,19 @@ struct Panel: View {
             Text("Stored in this app's preferences only. Prefilled from the SigNoz MCP server in ~/.claude.json when present.")
                 .font(.caption2).foregroundStyle(.secondary)
             Divider()
+            Text("Grafana (optional: hosts from its Prometheus datasource)").fontWeight(.semibold)
+            TextField("https://grafana.example.com", text: $grafanaURL).textFieldStyle(.roundedBorder)
+            SecureField("Service account token with Viewer role", text: $grafanaKey).textFieldStyle(.roundedBorder)
+                .onChange(of: grafanaURL) { _, _ in UserDefaults.standard.removeObject(forKey: "grafanaDS") }
+            Divider()
             Text("Limits").fontWeight(.semibold)
             Stepper("Error rate ≥ \(fmt(errPct))%", value: $errPct, in: 0.5...50, step: 0.5)
             Stepper("p99 latency ≥ \(fmtMs(p99Ms))", value: $p99Ms, in: 100...30000, step: 100)
             Stepper("Host CPU ≥ \(Int(cpuPct))%", value: $cpuPct, in: 50...100, step: 5)
             Stepper("Host memory ≥ \(Int(memPct))%", value: $memPct, in: 50...100, step: 5)
+            Stepper("Root disk ≥ \(Int(diskPct))% full", value: $diskPct, in: 50...100, step: 5)
+            Stepper("Load per core ≥ \(fmt(loadPerCore))", value: $loadPerCore, in: 0.5...8, step: 0.25)
+            Stepper("No data for ≥ \(Int(staleSec)) s", value: $staleSec, in: 30...1800, step: 30)
             Stepper("Repeat a notification at most every \(Int(cooldownMin)) min", value: $cooldownMin, in: 1...240, step: 5)
             Stepper("Poll SigNoz every \(Int(pollSec)) s", value: $pollSec, in: 15...600, step: 15)
                 .onChange(of: pollSec) { _, _ in model.schedule() }
@@ -276,7 +295,7 @@ struct ServerRow: View {
                 Text(s.name).fontWeight(h.sev == .ok ? .medium : .semibold).lineLimit(1).truncationMode(.middle)
                 Text(h.sev == .ok ? detail : h.why).font(.caption2).foregroundStyle(h.sev == .ok ? .secondary : h.sev.color).lineLimit(1)
             }
-            .frame(width: 200, alignment: .leading)
+            .frame(width: 180, alignment: .leading)
             Spacer()
             if s.missing {
                 Button("Forget") { model.forget(s.id) }.buttonStyle(.bordered).controlSize(.mini)
@@ -287,7 +306,9 @@ struct ServerRow: View {
             } else {
                 metric("cpu \(Int(s.cpuPct))%", severity(s.cpuPct, over: t.cpuPct), width: 58)
                 metric("mem \(Int(s.memPct))%", severity(s.memPct, over: t.memPct), width: 64)
-                metric("load \(fmt(s.load15))", .ok, width: 80)
+                metric(s.diskPct > 0 ? "disk \(Int(s.diskPct))%" : "", severity(s.diskPct, over: t.diskPct), width: 64)
+                if s.loadPerCore > 0 { metric("\(fmt(s.loadPerCore))/core", severity(s.loadPerCore, over: t.loadPerCore), width: 80) }
+                else { metric("load \(fmt(s.load15))", .ok, width: 80) }
             }
             Sparkline(values: model.hist[s.id] ?? [], color: h.sev.color,
                       range: 0...max(model.hist[s.id]?.max() ?? 1, s.kind == .service ? t.errPct : t.cpuPct))
@@ -301,7 +322,7 @@ struct ServerRow: View {
         let s = row.server
         switch s.kind {
         case .service: return "\(s.service) · \(s.env) · \(s.numErrors) errors"
-        case .host: return s.os.isEmpty ? "host" : s.os
+        case .host: return (s.os.isEmpty ? "host" : s.os) + (s.staleSec > 0 ? " · seen \(Int(s.staleSec)) s ago" : "")
         }
     }
 
