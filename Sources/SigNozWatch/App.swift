@@ -260,8 +260,16 @@ struct Panel: View {
                 .onChange(of: grafanaURL) { _, _ in UserDefaults.standard.removeObject(forKey: "grafanaDS") }
             Divider()
             Text("Server IPs").fontWeight(.semibold)
-            TextField("thrillo-partners-prod-app-server-3 10.0.0.12   (one per line; hostname or Grafana label, then the IP)", text: $serverIPs, axis: .vertical)
-                .textFieldStyle(.roundedBorder).font(.system(.caption, design: .monospaced)).lineLimit(3...8)
+            // ponytail: TextEditor, not a multi-line TextField: the latter dropped pasted text in this window.
+            TextEditor(text: $serverIPs)
+                .font(.system(.caption, design: .monospaced)).frame(height: 96)
+                .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Color.secondary.opacity(0.4)))
+                .overlay(alignment: .topLeading) {
+                    if serverIPs.isEmpty {
+                        Text("thrillo-partners-prod-app-server-3 10.0.0.12\nadmin-ui 10.0.0.20   (one per line: hostname or Grafana label, then the IP)")
+                            .font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).padding(.horizontal, 5).padding(.vertical, 1).allowsHitTesting(false)
+                    }
+                }
             Text("Shown next to each machine with a copy button. Nothing in SigNoz or Prometheus reports addresses, so they live here.")
                 .font(.caption2).foregroundStyle(.secondary)
             Divider()
