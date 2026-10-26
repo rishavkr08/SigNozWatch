@@ -51,6 +51,7 @@ struct Thresholds {
 // MARK: - Models
 
 let windowMinutes = 15   // services and hosts are summarised over this trailing window
+let chartMinutes = 60    // the per-machine charts show this much history
 
 enum Kind: String { case service, host }
 
@@ -255,6 +256,20 @@ enum Parse {
         }
     }
 
+    /// Prometheus range-query matrix → (labels, values in time order).
+    static func prometheusRange(_ data: Data) throws -> [(labels: [String: String], values: [Double])] {
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = (root["data"] as? [String: Any])?["result"] as? [[String: Any]] else { throw APIError(message: "prometheus range: unexpected JSON") }
+        return result.compactMap { r in
+            guard let labels = r["metric"] as? [String: String], let pairs = r["values"] as? [[Any]] else { return nil }
+            let values = pairs.compactMap { p -> Double? in
+                guard let v = p.last else { return nil }
+                return (v as? NSNumber)?.doubleValue ?? Double(v as? String ?? "")
+            }
+            return values.isEmpty ? nil : (labels, values)
+        }
+    }
+
     /// GET /api/v1/rules → every rule with its state; the condition is kept as text for name matching.
     static func rules(_ data: Data) throws -> [Alert] {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -329,35 +344,50 @@ struct SigNozClient {
 
 // MARK: - Grafana (Prometheus through the datasource proxy)
 
-/// Node-exporter queries, by (instance, server); `server` is Alloy's short name. `stale` catches a host that stopped pushing
-/// while its `up` series still reads 1. These match the "Infra — Fleet Overview" dashboard.
-let prometheusQueries: [String: String] = [
+/// Node-exporter queries, by (instance, server); `server` is Alloy's short name. These match the "Infra — Fleet Overview" dashboard.
+/// cpu/mem/disk run as range queries (the charts); the current value is the last point. `stale` catches a host that stopped
+/// pushing while its `up` series still reads 1.
+let prometheusRangeQueries: [String: String] = [
     "cpu": #"100 - avg by (instance, server)(rate(node_cpu_seconds_total{job="integrations/unix",mode="idle"}[5m])) * 100"#,
     "mem": #"max by (instance, server)((1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100)"#,
     "disk": #"max by (instance, server)((1 - node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}) * 100)"#,
+]
+let prometheusQueries: [String: String] = [
     "load": #"sum by (instance, server)(node_load1) / count by (instance, server)(count by (instance, server, cpu)(node_cpu_seconds_total{mode="idle"}))"#,
     "stale": #"time() - max by (instance, server)(timestamp(up{job="integrations/unix"}))"#,
 ]
 
-/// One host row per instance from the five query results.
-func mergeHosts(_ results: [String: [(labels: [String: String], value: Double)]], link: String) -> [Server] {
-    var hosts: [String: Server] = [:]
-    for (metric, rows) in results {
+typealias History = [String: [Double]]   // "<server id>/<cpu|mem|disk|rps|err|p99>" → oldest…newest
+
+/// One host row per instance from the query results, plus each host's chart history.
+func mergeHosts(instant: [String: [(labels: [String: String], value: Double)]],
+                ranges: [String: [(labels: [String: String], values: [Double])]], link: String) -> (hosts: [Server], hist: History) {
+    var hosts: [String: Server] = [:], hist: History = [:]
+    func host(_ labels: [String: String]) -> Server? {
+        guard let instance = labels["instance"] else { return nil }
+        return hosts[instance] ?? Server(kind: .host, name: instance, os: (labels["server"].map { "\($0) · " } ?? "") + "Grafana", link: link)
+    }
+    for (metric, rows) in ranges {
         for r in rows {
-            guard let instance = r.labels["instance"] else { continue }
-            var h = hosts[instance] ?? Server(kind: .host, name: instance, os: (r.labels["server"].map { "\($0) · " } ?? "") + "Grafana", link: link)
+            guard var h = host(r.labels), let last = r.values.last else { continue }
             switch metric {
-            case "cpu": h.cpuPct = r.value
-            case "mem": h.memPct = r.value
-            case "disk": h.diskPct = r.value
-            case "load": h.loadPerCore = r.value
-            case "stale": h.staleSec = max(r.value, 0)
+            case "cpu": h.cpuPct = last
+            case "mem": h.memPct = last
+            case "disk": h.diskPct = last
             default: break
             }
-            hosts[instance] = h
+            hist["\(h.id)/\(metric)"] = r.values
+            hosts[h.name] = h
         }
     }
-    return hosts.values.sorted { $0.name < $1.name }
+    for (metric, rows) in instant {
+        for r in rows {
+            guard var h = host(r.labels) else { continue }
+            if metric == "load" { h.loadPerCore = r.value } else if metric == "stale" { h.staleSec = max(r.value, 0) }
+            hosts[h.name] = h
+        }
+    }
+    return (hosts.values.sorted { $0.name < $1.name }, hist)
 }
 
 /// Service-account tokens start with "glsa_" and need an org Admin to create; anyone can use their own "user:password" instead.
@@ -368,19 +398,24 @@ func grafanaAuth(_ key: String) -> String {
 struct GrafanaClient {
     let config: Config
 
-    func hosts() async throws -> [Server] {
+    func hosts() async throws -> (hosts: [Server], hist: History) {
         let uid = try await datasourceUID()
-        var results: [String: [(labels: [String: String], value: Double)]] = [:]
-        try await withThrowingTaskGroup(of: (String, Data).self) { group in
+        let now = Int(Date().timeIntervalSince1970), start = now - chartMinutes * 60
+        var instant: [String: [(labels: [String: String], value: Double)]] = [:]
+        var ranges: [String: [(labels: [String: String], values: [Double])]] = [:]
+        try await withThrowingTaskGroup(of: (String, Bool, Data).self) { group in
+            let enc = { (e: String) in e.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? e }
             for (name, expr) in prometheusQueries {
-                group.addTask {
-                    let q = expr.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? expr
-                    return (name, try await send("/api/datasources/proxy/uid/\(uid)/api/v1/query?query=\(q)"))
-                }
+                group.addTask { (name, false, try await send("/api/datasources/proxy/uid/\(uid)/api/v1/query?query=\(enc(expr))")) }
             }
-            for try await (name, data) in group { results[name] = try Parse.prometheus(data) }
+            for (name, expr) in prometheusRangeQueries {
+                group.addTask { (name, true, try await send("/api/datasources/proxy/uid/\(uid)/api/v1/query_range?query=\(enc(expr))&start=\(start)&end=\(now)&step=60")) }
+            }
+            for try await (name, isRange, data) in group {
+                if isRange { ranges[name] = try Parse.prometheusRange(data) } else { instant[name] = try Parse.prometheus(data) }
+            }
         }
-        return mergeHosts(results, link: config.gBase + "/d/infra-fleet")
+        return mergeHosts(instant: instant, ranges: ranges, link: config.gBase + "/d/infra-fleet")
     }
 
     /// The first Prometheus datasource, looked up once and remembered.
