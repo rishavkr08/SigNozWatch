@@ -128,7 +128,7 @@ func pollOnce() -> Never {
             let (servers, alerts) = try await SigNozClient(config: c).fetch()
             for s in servers {
                 let h = health(s, .load(), alerts: alerts)
-                print("\(h.sev) \(s.kind.rawValue) \(s.name): " + (s.kind == .service
+                print("\(h.sev) \(s.kind.rawValue) \(s.name)" + (s.service.isEmpty ? "" : " (\(s.service), \(s.env))") + ": " + (s.kind == .service
                     ? "\(fmt(s.callRate))/s, \(s.numErrors) errors (\(fmt(s.errorPct))%), p99 \(fmtMs(s.p99Ms))"
                     : "cpu \(Int(s.cpuPct))%, mem \(Int(s.memPct))%, load15 \(fmt(s.load15))") + (h.why.isEmpty ? "" : " — \(h.why)"))
             }
@@ -165,8 +165,8 @@ struct Panel: View {
                         Label(e, systemImage: "exclamationmark.triangle").font(.callout).foregroundStyle(.orange).lineLimit(3)
                     }
                     if showSettings || url.isEmpty || key.isEmpty { settingsCard }
-                    ServersCard(title: "Services", rows: model.services, model: model, empty: "No traced services in the last \(windowMinutes) min")
-                    ServersCard(title: "Hosts", rows: model.hosts, model: model, empty: "No hosts sending infra metrics")
+                    ServersCard(title: "Servers", rows: model.services, model: model, empty: "No machine sent traces in the last \(windowMinutes) min")
+                    ServersCard(title: "Host metrics", rows: model.hosts, model: model, empty: "No host sending infra metrics")
                     AlertsCard(model: model)
                     EventsCard(model: model)
                 }
@@ -259,7 +259,7 @@ struct ServersCard: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             if rows.isEmpty { Text(empty).font(.callout).foregroundStyle(.secondary) }
-            ForEach(rows.sorted { $0.health.sev > $1.health.sev }) { ServerRow(row: $0, model: model) }
+            ForEach(rows.sorted { ($0.health.sev, $1.server.env, $1.server.name) > ($1.health.sev, $0.server.env, $0.server.name) }) { ServerRow(row: $0, model: model) }
         }
     }
 }
@@ -273,10 +273,10 @@ struct ServerRow: View {
         HStack(spacing: 10) {
             Circle().fill(h.sev.color).frame(width: 9, height: 9)
             VStack(alignment: .leading, spacing: 1) {
-                Text(s.name).fontWeight(h.sev == .ok ? .medium : .semibold).lineLimit(1)
+                Text(s.name).fontWeight(h.sev == .ok ? .medium : .semibold).lineLimit(1).truncationMode(.middle)
                 Text(h.sev == .ok ? detail : h.why).font(.caption2).foregroundStyle(h.sev == .ok ? .secondary : h.sev.color).lineLimit(1)
             }
-            .frame(width: 150, alignment: .leading)
+            .frame(width: 200, alignment: .leading)
             Spacer()
             if s.missing {
                 Button("Forget") { model.forget(s.id) }.buttonStyle(.bordered).controlSize(.mini)
@@ -291,7 +291,7 @@ struct ServerRow: View {
             }
             Sparkline(values: model.hist[s.id] ?? [], color: h.sev.color,
                       range: 0...max(model.hist[s.id]?.max() ?? 1, s.kind == .service ? t.errPct : t.cpuPct))
-                .frame(width: 50, height: 18)
+                .frame(width: 40, height: 18)
             Button { model.open(s.path) } label: { Image(systemName: "arrow.up.right.square") }
                 .buttonStyle(.plain).foregroundStyle(.secondary).help("Open in SigNoz")
         }
@@ -300,7 +300,7 @@ struct ServerRow: View {
     var detail: String {
         let s = row.server
         switch s.kind {
-        case .service: return "\(s.numCalls) calls · \(s.numErrors) errors"
+        case .service: return "\(s.service) · \(s.env) · \(s.numErrors) errors"
         case .host: return s.os.isEmpty ? "host" : s.os
         }
     }

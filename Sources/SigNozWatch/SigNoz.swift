@@ -49,8 +49,9 @@ enum Kind: String { case service, host }
 
 struct Server: Identifiable {
     let kind: Kind
-    let name: String
-    var id: String { "\(kind.rawValue):\(name)" }
+    let name: String          // machine (host.name) for both kinds
+    var service = "", env = ""   // service rows: which app and deployment.environment runs on that machine
+    var id: String { kind == .service ? "service:\(service)@\(name)" : "host:\(name)" }
     // service, over the window
     var callRate = 0.0, numCalls = 0, numErrors = 0, errorPct = 0.0, p99Ms = 0.0
     // host
@@ -60,7 +61,7 @@ struct Server: Identifiable {
 
     var path: String {
         switch kind {
-        case .service: "/services/" + (name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name)
+        case .service: "/services/" + (service.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? service)
         case .host: "/infrastructure-monitoring/hosts"
         }
     }
@@ -70,14 +71,18 @@ struct Alert: Identifiable {
     let id: String
     let name: String
     let severity: String   // label from the rule: critical / warning / …
+    let env: String        // label from the rule, "" when it has none
     let state: String      // firing / inactive / disabled
     let detail: String     // annotations.description
     let text: String       // name + condition, used to match a server by name
     var firing: Bool { state == "firing" }
     var sev: Severity { severity == "critical" ? .bad : .warn }
     var path: String { "/alerts/overview?ruleId=\(id)" }
-    // ponytail: rules carry no service label here, so a rule belongs to a server when its name or query mentions it.
-    func matches(_ server: String) -> Bool { text.range(of: server, options: .caseInsensitive) != nil }
+    // ponytail: rules carry no service label here, so a rule belongs to a machine when its name or query mentions
+    // the machine or its service, and the rule's env label (if any) is that machine's environment.
+    func matches(_ s: Server) -> Bool {
+        (env.isEmpty || s.env.isEmpty || env == s.env) && [s.name, s.service].contains { !$0.isEmpty && text.range(of: $0, options: .caseInsensitive) != nil }
+    }
 }
 
 struct Snapshot {
@@ -103,7 +108,7 @@ func health(_ s: Server, _ t: Thresholds, alerts: [Alert]) -> Health {
         parts.append((severity(s.cpuPct, over: t.cpuPct), "CPU \(Int(s.cpuPct))%"))
         parts.append((severity(s.memPct, over: t.memPct), "memory \(Int(s.memPct))%"))
     }
-    parts += alerts.filter { $0.firing && $0.matches(s.name) }.map { ($0.sev, $0.name) }
+    parts += alerts.filter { $0.firing && $0.matches(s) }.map { ($0.sev, $0.name) }
     let worst = parts.map(\.0).max() ?? .ok
     return Health(sev: worst, why: worst == .ok ? "" : parts.filter { $0.0 == worst }.map(\.1).joined(separator: " · "))
 }
@@ -114,7 +119,9 @@ func merge(_ fresh: [Server], known: [String]) -> [Server] {
     let gone = known.filter { !ids.contains($0) }.compactMap { id -> Server? in
         let p = id.split(separator: ":", maxSplits: 1)
         guard p.count == 2, let k = Kind(rawValue: String(p[0])) else { return nil }
-        var s = Server(kind: k, name: String(p[1]))
+        let at = p[1].split(separator: "@", maxSplits: 1)   // service:<service>@<host>
+        guard k == .host || at.count == 2 else { return nil }
+        var s = Server(kind: k, name: String(at.last ?? p[1]), service: k == .service ? String(at[0]) : "")
         s.missing = true
         return s
     }
@@ -144,12 +151,21 @@ enum Parse {
         let data: Data
     }
 
-    /// POST /api/v1/services → p99 in ns, errorRate in %, callRate per second.
-    static func services(_ data: Data) throws -> [Server] {
-        try JSONDecoder().decode([ServiceJSON].self, from: data).map {
-            var s = Server(kind: .service, name: $0.serviceName)
-            s.callRate = $0.callRate; s.numCalls = Int($0.numCalls); s.numErrors = Int($0.numErrors)
-            s.errorPct = $0.errorRate; s.p99Ms = $0.p99 / 1e6
+    /// POST /api/v5/query_range, traces grouped by service, host and environment with count(), countIf(has_error), p99(duration_nano).
+    static func traces(_ data: Data, windowSec: Double = Double(windowMinutes * 60)) throws -> [Server] {
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = (((root["data"] as? [String: Any])?["data"] as? [String: Any])?["results"] as? [[String: Any]])?.first,
+              let columns = (result["columns"] as? [[String: Any]])?.compactMap({ $0["name"] as? String }),
+              let rows = result["data"] as? [[Any]] else { throw APIError(message: "traces: unexpected JSON") }
+        func col(_ row: [Any], _ name: String) -> Any? { columns.firstIndex(of: name).flatMap { $0 < row.count ? row[$0] : nil } }
+        return rows.compactMap { row in
+            guard let host = col(row, "host.name") as? String, let svc = col(row, "service.name") as? String else { return nil }
+            var s = Server(kind: .service, name: host, service: svc, env: col(row, "deployment.environment") as? String ?? "")
+            let calls = (col(row, "__result_0") as? NSNumber)?.doubleValue ?? 0
+            let errors = (col(row, "__result_1") as? NSNumber)?.doubleValue ?? 0
+            s.numCalls = Int(calls); s.numErrors = Int(errors); s.callRate = calls / windowSec
+            s.errorPct = calls > 0 ? errors / calls * 100 : 0
+            s.p99Ms = ((col(row, "__result_2") as? NSNumber)?.doubleValue ?? 0) / 1e6
             return s
         }
     }
@@ -171,7 +187,7 @@ enum Parse {
             guard let id = r["id"] as? String, let name = r["alert"] as? String else { return nil }
             let labels = r["labels"] as? [String: String] ?? [:]
             let disabled = r["disabled"] as? Bool ?? false
-            return Alert(id: id, name: name, severity: labels["severity"] ?? "warning",
+            return Alert(id: id, name: name, severity: labels["severity"] ?? "warning", env: labels["env"] ?? "",
                          state: disabled ? "disabled" : (r["state"] as? String ?? "inactive"),
                          detail: (r["annotations"] as? [String: String])?["description"] ?? "",
                          text: name + " " + String(describing: r["condition"] ?? ""))
@@ -186,13 +202,26 @@ struct SigNozClient {
 
     func fetch() async throws -> (servers: [Server], alerts: [Alert]) {
         let now = Date(), start = now.addingTimeInterval(-Double(windowMinutes * 60))
-        let ns = { (d: Date) in String(Int64(d.timeIntervalSince1970)) + "000000000" }
         let ms = { (d: Date) in Int64(d.timeIntervalSince1970 * 1000) }
-        async let services = post("/api/v1/services", ["start": ns(start), "end": ns(now), "tags": []])
+        async let traces = post("/api/v5/query_range", tracesQuery(start: ms(start), end: ms(now)))
         async let hosts = post("/api/v1/hosts/list", ["start": ms(start), "end": ms(now), "filters": ["items": [], "op": "and"],
                                                       "groupBy": [], "orderBy": ["columnName": "cpu", "order": "desc"], "offset": 0, "limit": 200])
         async let rules = get("/api/v1/rules")
-        return (try Parse.services(await services) + Parse.hosts(await hosts), try Parse.rules(await rules))
+        return (try Parse.traces(await traces) + Parse.hosts(await hosts), try Parse.rules(await rules))
+    }
+
+    /// One scalar query: every (service, machine, environment) seen in traces, with calls, errors and p99.
+    func tracesQuery(start: Int64, end: Int64) -> [String: Any] {
+        let group = ["service.name", "host.name", "deployment.environment"].map {
+            ["name": $0, "fieldDataType": "string", "signal": "traces", "fieldContext": "resource"]
+        }
+        let spec: [String: Any] = ["name": "A", "signal": "traces", "disabled": false, "limit": 200, "offset": 0,
+                                   "having": ["expression": ""], "filter": ["expression": ""],
+                                   "aggregations": [["expression": "count()"], ["expression": "countIf(has_error = true)"], ["expression": "p99(duration_nano)"]],
+                                   "groupBy": group, "order": [["key": ["name": "count()"], "direction": "desc"]]]
+        return ["schemaVersion": "v1", "start": start, "end": end, "requestType": "scalar",
+                "compositeQuery": ["queries": [["type": "builder_query", "spec": spec]]],
+                "formatOptions": ["formatTableResultForUI": false, "fillGaps": false], "variables": [:]]
     }
 
     func get(_ path: String) async throws -> Data { try await send(request(path)) }

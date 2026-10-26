@@ -6,9 +6,9 @@ private func check(_ ok: Bool, _ what: String) {
 
 /// `SigNozWatch --check`: the one runnable check for the pure logic. Touches no network and no preferences.
 func selfCheck() {
-    let services = Data(#"""
-    [{"serviceName":"atlas","p99":262061607.06,"avgDuration":35406331.7,"numCalls":343,"callRate":0.394,"numErrors":0,"errorRate":0,"num4XX":0,"fourXXRate":0,"dataWarning":{"topLevelOps":["GET"]}},
-     {"serviceName":"thrillophilia-partners","p99":6371423515.23,"avgDuration":1,"numCalls":24405,"callRate":1548.27,"numErrors":1465,"errorRate":6.0,"num4XX":0,"fourXXRate":0}]
+    let traces = Data(#"""
+    {"status":"success","data":{"type":"scalar","data":{"results":[{"queryName":"A","columns":[{"name":"service.name"},{"name":"host.name"},{"name":"deployment.environment"},{"name":"__result_0"},{"name":"__result_1"},{"name":"__result_2"}],
+     "data":[["atlas","atlas-prod-app-server","production",343,0,262061607.06],["thrillophilia-partners","thrillo-partners-prod-app-server-3","production",24405,1465,6371423515.23]]}]}}}
     """#.utf8)
     let hosts = Data(#"""
     {"status":"success","data":{"type":"list","records":[{"hostName":"staging-1","active":true,"os":"linux","cpu":0.76,"memory":0.55,"wait":0.0011,"load15":4.93,"meta":{"host.name":"staging-1"}},
@@ -16,37 +16,41 @@ func selfCheck() {
     """#.utf8)
     let rules = Data(#"""
     {"status":"success","data":{"rules":[
-     {"id":"r1","state":"firing","alert":"[Prod] Sidekiq job failures spiking","labels":{"severity":"warning"},"annotations":{"description":"Normal is ~10-40 failures."},"disabled":false,
+     {"id":"r1","state":"firing","alert":"[Prod] Sidekiq job failures spiking","labels":{"severity":"warning","env":"production"},"annotations":{"description":"Normal is ~10-40 failures."},"disabled":false,
       "condition":{"compositeQuery":{"queries":[{"spec":{"query":"SELECT count() WHERE serviceName = 'thrillophilia-partners'"}}]}}},
      {"id":"r2","state":"inactive","alert":"[Prod] DB saturated","labels":{"severity":"critical"},"disabled":false,"condition":{}},
      {"id":"r3","state":"inactive","alert":"Old rule","labels":{},"disabled":true,"condition":{}}]}}
     """#.utf8)
 
-    guard let sv = try? Parse.services(services), let hs = try? Parse.hosts(hosts), let al = try? Parse.rules(rules) else {
+    guard let sv = try? Parse.traces(traces, windowSec: 900), let hs = try? Parse.hosts(hosts), let al = try? Parse.rules(rules) else {
         check(false, "parse threw"); return
     }
-    check(sv.count == 2 && sv[0].name == "atlas" && Int(sv[0].p99Ms) == 262 && sv[1].numErrors == 1465 && sv[1].errorPct == 6.0, "services parse (p99 ns → ms)")
+    check(sv.count == 2 && sv[0].name == "atlas-prod-app-server" && sv[0].service == "atlas" && sv[0].env == "production" && Int(sv[0].p99Ms) == 262
+          && sv[1].numErrors == 1465 && Int(sv[1].errorPct.rounded()) == 6 && Int(sv[1].callRate.rounded()) == 27, "traces parse (one row per machine, p99 ns → ms, rate per s)")
+    check(sv[0].id == "service:atlas@atlas-prod-app-server" && sv[0].path == "/services/atlas", "id and link")
     check(hs.count == 2 && Int(hs[0].cpuPct.rounded()) == 76 && Int(hs[0].memPct.rounded()) == 55 && hs[0].os == "linux" && !hs[1].active, "hosts parse (fractions → %)")
     check(al.count == 3 && al[0].firing && al[0].sev == .warn && al[1].state == "inactive" && al[2].state == "disabled", "rules parse")
-    check(al[0].matches("thrillophilia-partners") && !al[0].matches("atlas"), "rule matched to its service by name")
-    check((try? Parse.rules(services)) == nil, "rules parser rejects the wrong shape")
+    check(al[0].matches(sv[1]) && !al[0].matches(sv[0]), "rule matched to its service's machines by name")
+    check(!al[0].matches(Server(kind: .service, name: "staging-1", service: "thrillophilia-partners", env: "staging")), "a production rule leaves staging machines alone")
+    check((try? Parse.rules(traces)) == nil && (try? Parse.traces(rules)) == nil, "parsers reject the wrong shape")
 
     let t = Thresholds.load()
     check(t.errPct == 5 && t.p99Ms == 2000 && t.pollSec == 60, "limits come registered")
     check(health(sv[0], t, alerts: al).sev == .ok, "quiet service is green")
     let partners = health(sv[1], t, alerts: al)
     check(partners.sev == .bad && partners.why == "6.0% errors · p99 6.4 s", "errors over the limit are red, with both reasons")
+    let quietPartners = Server(kind: .service, name: "box-9", service: "thrillophilia-partners", env: "production")
+    check(health(quietPartners, t, alerts: al).why == "no traffic in 15 min · [Prod] Sidekiq job failures spiking", "a firing rule naming the service colours its machines orange")
     var warm = sv[0]; warm.errorPct = 4.2
     check(health(warm, t, alerts: []).sev == .warn, "80% of the error limit is orange")
     var idle = sv[0]; idle.numCalls = 0
     check(health(idle, t, alerts: []).why == "no traffic in 15 min", "no traffic is orange")
     check(health(hs[1], t, alerts: []).sev == .bad && health(hs[0], t, alerts: []).sev == .warn, "inactive host red, 76% CPU orange")
-    let alerted = Server(kind: .service, name: "thrillophilia-partners")
-    check(health(alerted, t, alerts: al).why == "no traffic in 15 min · [Prod] Sidekiq job failures spiking", "a firing warning rule shows on its service")
 
-    let merged = merge(sv, known: ["service:atlas", "host:old-box", "junk"])
-    check(merged.count == 3 && merged[2].kind == .host && merged[2].name == "old-box" && merged[2].missing, "known server missing from the poll is kept as missing")
-    check(health(merged[2], t, alerts: []).sev == .bad, "missing server is red")
+    let merged = merge(sv, known: ["service:atlas@atlas-prod-app-server", "service:atlas@atlas-prod-app-server-2", "host:old-box", "junk", "service:bare"])
+    check(merged.count == 4 && merged[2].service == "atlas" && merged[2].name == "atlas-prod-app-server-2" && merged[2].missing
+          && merged[3].kind == .host && merged[3].name == "old-box", "known servers missing from the poll are kept as missing")
+    check(health(merged[3], t, alerts: []).sev == .bad, "missing server is red")
 
     check(labelText(unhealthy: 0, hasData: true, error: nil) == "OK", "label when all healthy")
     check(labelText(unhealthy: 2, hasData: true, error: "x") == "2", "label shows the count even when the last poll failed")

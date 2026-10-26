@@ -3,7 +3,7 @@
 Menu bar status of every server in your SigNoz, for macOS 14+. Native Swift/SwiftUI, no dependencies. Sibling of [SysWatch](../SysWatch).
 
 - **Menu bar:** a green/orange/red dot plus the number of unhealthy servers (`OK` when none).
-- **Panel:** APM services (requests/s, error rate, p99), infra hosts (CPU, memory, load), SigNoz alert rules (firing first) and the notifications sent. Every row has a one-line reason and a link into SigNoz.
+- **Panel:** one row per machine from traces (service, environment, requests/s, error rate, p99), host metrics where the infra agent runs (CPU, memory, load), SigNoz alert rules (firing first) and the notifications sent. Every row has a one-line reason and a link into SigNoz.
 - **Colours:** orange within 80% of a limit or a warning alert, red over a limit, a critical alert, a host that stopped sending metrics or a server that disappeared from SigNoz.
 - **Notifications** when a server turns red or a rule starts firing, at most once per cooldown (30 min by default). Clicking one opens it in SigNoz.
 
@@ -26,4 +26,4 @@ On first launch the app takes the SigNoz URL and API key from the SigNoz MCP ser
 
 ## SigNoz API used
 
-`POST /api/v1/services`, `POST /api/v1/hosts/list` and `GET /api/v1/rules`, with the `SIGNOZ-API-KEY` header, over the last 15 minutes, every 60 s (adjustable).
+`POST /api/v5/query_range` (traces grouped by `service.name`, `host.name` and `deployment.environment` with `count()`, `countIf(has_error = true)` and `p99(duration_nano)`), `POST /api/v1/hosts/list` and `GET /api/v1/rules`, with the `SIGNOZ-API-KEY` header, over the last 15 minutes, every 60 s (adjustable).
