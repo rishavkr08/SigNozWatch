@@ -105,6 +105,57 @@ struct Snapshot {
 
 struct Health { let sev: Severity; let why: String }
 
+struct Row: Identifiable {
+    let server: Server
+    let health: Health
+    var id: String { server.id }
+}
+
+/// One physical machine: its traced services (SigNoz) and its host metrics (SigNoz agent or Grafana), merged.
+struct Machine: Identifiable {
+    let name: String
+    var services: [Row] = []
+    var host: Row?
+    var id: String { name }
+    var rows: [Row] { services + (host.map { [$0] } ?? []) }
+    var sev: Severity { rows.map(\.health.sev).max() ?? .ok }
+    var why: String { Array(NSOrderedSet(array: rows.map(\.health.why).filter { !$0.isEmpty })).compactMap { $0 as? String }.joined(separator: " · ") }
+    var env: String { services.first?.server.env ?? "" }
+    var missing: Bool { rows.contains { $0.server.missing } }
+    var link: String { host?.server.link.isEmpty == false ? host!.server.link : services.first?.server.path ?? host?.server.path ?? "/" }
+}
+
+func machines(_ rows: [Row]) -> [Machine] {
+    var byName: [String: Machine] = [:]
+    for r in rows {
+        var m = byName[r.server.name] ?? Machine(name: r.server.name)
+        if r.server.kind == .host { m.host = r } else { m.services.append(r) }
+        byName[r.server.name] = m
+    }
+    return byName.values.sorted { ($0.sev, $1.name) > ($1.sev, $0.name) }
+}
+
+let categoryOrder = ["App servers", "Web & UI", "Data stores", "Tooling", "Staging", "Other"]
+
+/// ponytail: role from the hostname and Grafana's short label; extend the keyword lists when a new kind of box appears.
+func category(_ m: Machine) -> String {
+    let label = m.host?.server.os.components(separatedBy: " · ").first ?? ""   // "admin-ui · Grafana" → "admin-ui"
+    let text = (m.name + " " + label).lowercased()
+    if m.env == "staging" || text.contains("staging") { return "Staging" }
+    if !m.services.isEmpty { return "App servers" }
+    if ["redis", "elasticsearch", "postgres", "mysql", "mongo", "db"].contains(where: text.contains) { return "Data stores" }
+    if ["sentry", "signoz", "grafana", "monitor", "jenkins", "ci"].contains(where: text.contains) { return "Tooling" }
+    if ["ui", "next", "web", "admin", "front"].contains(where: text.contains) { return "Web & UI" }
+    return "Other"
+}
+
+func categorised(_ ms: [Machine]) -> [(String, [Machine])] {
+    categoryOrder.compactMap { c in
+        let in_ = ms.filter { category($0) == c }
+        return in_.isEmpty ? nil : (c, in_)
+    }
+}
+
 /// Row colour: worst of the numeric limits and any firing alert that mentions the server. `why` names what tripped.
 func health(_ s: Server, _ t: Thresholds, alerts: [Alert]) -> Health {
     if s.missing { return Health(sev: .bad, why: "no longer reported by SigNoz") }

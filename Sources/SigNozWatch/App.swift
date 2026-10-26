@@ -19,12 +19,6 @@ func severity(_ value: Double, over threshold: Double) -> Severity {
     value >= threshold ? .bad : value >= threshold * 0.8 ? .warn : .ok
 }
 
-struct Row: Identifiable {
-    let server: Server
-    let health: Health
-    var id: String { server.id }
-}
-
 // MARK: - Model
 
 @MainActor
@@ -51,10 +45,10 @@ final class Model: ObservableObject {
 
     var thresholds: Thresholds { .load() }
     var rows: [Row] { snap.servers.map { Row(server: $0, health: health($0, thresholds, alerts: snap.alerts)) } }
-    var services: [Row] { rows.filter { $0.server.kind == .service } }
-    var hosts: [Row] { rows.filter { $0.server.kind == .host } }
+    var machines: [Machine] { SigNozWatch.machines(rows) }
+    var categories: [(String, [Machine])] { categorised(machines) }
     var firing: [Alert] { snap.alerts.filter(\.firing) }
-    var unhealthy: Int { rows.filter { $0.health.sev != .ok }.count }
+    var unhealthy: Int { machines.filter { $0.sev != .ok }.count }
     var overall: Severity { max(rows.map(\.health.sev).max() ?? .ok, firing.map(\.sev).max() ?? .ok, snap.error == nil ? .ok : .warn) }
     var label: String { labelText(unhealthy: unhealthy, hasData: !snap.servers.isEmpty, error: snap.error) }
 
@@ -131,12 +125,14 @@ func pollOnce() -> Never {
         do {
             var (servers, alerts) = try await SigNozClient(config: c).fetch()
             if c.grafanaSet { servers += try await GrafanaClient(config: c).hosts() } else { print("Grafana: not configured") }
-            for s in servers {
-                let h = health(s, .load(), alerts: alerts)
-                print("\(h.sev) \(s.kind.rawValue) \(s.name)" + (s.service.isEmpty ? "" : " (\(s.service), \(s.env))") + ": " + (s.kind == .service
-                    ? "\(fmt(s.callRate))/s, \(s.numErrors) errors (\(fmt(s.errorPct))%), p99 \(fmtMs(s.p99Ms))"
-                    : "cpu \(Int(s.cpuPct))%, mem \(Int(s.memPct))%, disk \(Int(s.diskPct))%, load/core \(fmt(s.loadPerCore)), load15 \(fmt(s.load15)), stale \(Int(s.staleSec))s [\(s.os)]")
-                    + (h.why.isEmpty ? "" : " — \(h.why)"))
+            let rows = servers.map { Row(server: $0, health: health($0, .load(), alerts: alerts)) }
+            for (cat, ms) in categorised(machines(rows)) {
+                print("== \(cat)")
+                for m in ms {
+                    let parts = m.services.map { "\($0.server.service)/\($0.server.env): \(fmt($0.server.callRate))/s, \($0.server.numErrors) errors (\(fmt($0.server.errorPct))%), p99 \(fmtMs($0.server.p99Ms))" }
+                        + (m.host.map { h in ["host: cpu \(Int(h.server.cpuPct))%, mem \(Int(h.server.memPct))%, disk \(Int(h.server.diskPct))%, load/core \(fmt(h.server.loadPerCore)), stale \(Int(h.server.staleSec))s [\(h.server.os)]"] } ?? [])
+                    print("\(m.sev) \(m.name): " + parts.joined(separator: " | ") + (m.why.isEmpty ? "" : " — \(m.why)"))
+                }
             }
             for a in alerts { print("\(a.state) alert (\(a.severity)): \(a.name)") }
         } catch { print("error: \(error.localizedDescription)") }
@@ -176,8 +172,10 @@ struct Panel: View {
                         Label(e, systemImage: "exclamationmark.triangle").font(.callout).foregroundStyle(.orange).lineLimit(3)
                     }
                     if showSettings || url.isEmpty || key.isEmpty { settingsCard }
-                    ServersCard(title: "Servers", rows: model.services, model: model, empty: "No machine sent traces in the last \(windowMinutes) min")
-                    ServersCard(title: "Host metrics", rows: model.hosts, model: model, empty: "No host sending infra metrics")
+                    if model.machines.isEmpty && model.snap.error == nil {
+                        Card { Text("No machine sent traces or host metrics in the last \(windowMinutes) min").font(.callout).foregroundStyle(.secondary) }
+                    }
+                    ForEach(model.categories, id: \.0) { CategoryCard(title: $0.0, machines: $0.1, model: model) }
                     AlertsCard(model: model)
                     EventsCard(model: model)
                 }
@@ -265,69 +263,81 @@ struct Card<Content: View>: View {
     }
 }
 
-// MARK: - Servers
+// MARK: - Machines by role
 
-struct ServersCard: View {
+struct CategoryCard: View {
     let title: String
-    let rows: [Row]
+    let machines: [Machine]
     @ObservedObject var model: Model
-    let empty: String
 
     var body: some View {
         Card {
             HStack {
                 Text(title).fontWeight(.semibold)
                 Spacer()
-                Text(rows.isEmpty ? "" : "\(rows.filter { $0.health.sev == .ok }.count) of \(rows.count) healthy · last \(windowMinutes) min")
-                    .font(.caption).foregroundStyle(.secondary)
+                Text("\(machines.filter { $0.sev == .ok }.count) of \(machines.count) healthy · last \(windowMinutes) min").font(.caption).foregroundStyle(.secondary)
             }
-            if rows.isEmpty { Text(empty).font(.callout).foregroundStyle(.secondary) }
-            ForEach(rows.sorted { ($0.health.sev, $1.server.env, $1.server.name) > ($1.health.sev, $0.server.env, $0.server.name) }) { ServerRow(row: $0, model: model) }
+            ForEach(machines) { MachineRow(m: $0, model: model) }
         }
     }
 }
 
-struct ServerRow: View {
-    let row: Row
+/// One machine: name and reason on the left, trace numbers and host numbers as one line each on the right.
+struct MachineRow: View {
+    let m: Machine
     @ObservedObject var model: Model
 
     var body: some View {
-        let s = row.server, h = row.health, t = model.thresholds
-        HStack(spacing: 10) {
-            Circle().fill(h.sev.color).frame(width: 9, height: 9)
+        let t = model.thresholds
+        HStack(alignment: .center, spacing: 10) {
+            Circle().fill(m.sev.color).frame(width: 9, height: 9)
             VStack(alignment: .leading, spacing: 1) {
-                Text(s.name).fontWeight(h.sev == .ok ? .medium : .semibold).lineLimit(1).truncationMode(.middle)
-                Text(h.sev == .ok ? detail : h.why).font(.caption2).foregroundStyle(h.sev == .ok ? .secondary : h.sev.color).lineLimit(1)
+                Text(m.name).fontWeight(m.sev == .ok ? .medium : .semibold).lineLimit(1).truncationMode(.middle)
+                Text(m.sev == .ok ? detail : m.why).font(.caption2).foregroundStyle(m.sev == .ok ? .secondary : m.sev.color).lineLimit(2)
             }
             .frame(width: 180, alignment: .leading)
             Spacer()
-            if s.missing {
-                Button("Forget") { model.forget(s.id) }.buttonStyle(.bordered).controlSize(.mini)
-            } else if s.kind == .service {
-                metric("\(fmt(s.callRate))/s", .ok, width: 58)
-                metric("\(fmt(s.errorPct))% err", severity(s.errorPct, over: t.errPct), width: 64)
-                metric("p99 \(fmtMs(s.p99Ms))", severity(s.p99Ms, over: t.p99Ms), width: 80)
+            if m.missing && m.rows.allSatisfy(\.server.missing) {
+                Button("Forget") { m.rows.forEach { model.forget($0.id) } }.buttonStyle(.bordered).controlSize(.mini)
             } else {
-                metric("cpu \(Int(s.cpuPct))%", severity(s.cpuPct, over: t.cpuPct), width: 58)
-                metric("mem \(Int(s.memPct))%", severity(s.memPct, over: t.memPct), width: 64)
-                metric(s.diskPct > 0 ? "disk \(Int(s.diskPct))%" : "", severity(s.diskPct, over: t.diskPct), width: 64)
-                if s.loadPerCore > 0 { metric("\(fmt(s.loadPerCore))/core", severity(s.loadPerCore, over: t.loadPerCore), width: 80) }
-                else { metric("load \(fmt(s.load15))", .ok, width: 80) }
+                VStack(alignment: .trailing, spacing: 2) {
+                    ForEach(m.services) { r in
+                        let s = r.server
+                        HStack(spacing: 0) {
+                            if m.services.count > 1 { Text(s.service).font(.caption2).foregroundStyle(.secondary).lineLimit(1) }
+                            metric("\(fmt(s.callRate))/s", .ok, width: 58)
+                            metric("\(fmt(s.errorPct))% err", severity(s.errorPct, over: t.errPct), width: 64)
+                            metric("p99 \(fmtMs(s.p99Ms))", severity(s.p99Ms, over: t.p99Ms), width: 80)
+                        }
+                    }
+                    if let h = m.host?.server {
+                        HStack(spacing: 0) {
+                            metric("cpu \(Int(h.cpuPct))%", severity(h.cpuPct, over: t.cpuPct), width: 58)
+                            metric("mem \(Int(h.memPct))%", severity(h.memPct, over: t.memPct), width: 64)
+                            metric(h.diskPct > 0 ? "disk \(Int(h.diskPct))%" : "", severity(h.diskPct, over: t.diskPct), width: 64)
+                            if h.loadPerCore > 0 { metric("\(fmt(h.loadPerCore))/core", severity(h.loadPerCore, over: t.loadPerCore), width: 80) }
+                            else { metric("load \(fmt(h.load15))", .ok, width: 80) }
+                        }
+                    }
+                }
             }
-            Sparkline(values: model.hist[s.id] ?? [], color: h.sev.color,
-                      range: 0...max(model.hist[s.id]?.max() ?? 1, s.kind == .service ? t.errPct : t.cpuPct))
+            Sparkline(values: hist, color: m.sev.color, range: 0...max(hist.max() ?? 1, m.host == nil ? t.errPct : t.cpuPct))
                 .frame(width: 40, height: 18)
-            Button { model.open(s.path) } label: { Image(systemName: "arrow.up.right.square") }
-                .buttonStyle(.plain).foregroundStyle(.secondary).help("Open in SigNoz")
+            Button { model.open(m.link) } label: { Image(systemName: "arrow.up.right.square") }
+                .buttonStyle(.plain).foregroundStyle(.secondary).help("Open in " + (m.link.contains("grafana") ? "Grafana" : "SigNoz"))
         }
     }
 
+    /// CPU history when the machine has host metrics, else its error rate.
+    var hist: [Double] { model.hist[m.host?.id ?? m.services.first?.id ?? ""] ?? [] }
+
     var detail: String {
-        let s = row.server
-        switch s.kind {
-        case .service: return "\(s.service) · \(s.env) · \(s.numErrors) errors"
-        case .host: return (s.os.isEmpty ? "host" : s.os) + (s.staleSec > 0 ? " · seen \(Int(s.staleSec)) s ago" : "")
+        var parts = m.services.map { "\($0.server.service) · \($0.server.env)" }
+        if let h = m.host?.server {
+            parts.append(h.os.isEmpty ? "host" : h.os)
+            if h.staleSec > 0 { parts.append("seen \(Int(h.staleSec)) s ago") }
         }
+        return parts.joined(separator: " · ")
     }
 
     func metric(_ text: String, _ sev: Severity, width: CGFloat) -> some View {

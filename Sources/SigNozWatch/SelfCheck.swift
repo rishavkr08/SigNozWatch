@@ -72,6 +72,21 @@ func selfCheck() {
 
     check(grafanaAuth("glsa_abc") == "Bearer glsa_abc" && grafanaAuth("rishav:p:w") == "Basic cmlzaGF2OnA6dw==", "token → Bearer, user:password → Basic")
 
+    var stagingHost = Server(kind: .host, name: "staging-1", os: "linux"); stagingHost.cpuPct = 40
+    var stagingSvc = Server(kind: .service, name: "staging-1", service: "thrillophilia-partners", env: "staging"); stagingSvc.numCalls = 5
+    let all = [sv[0], sv[1], stagingHost, stagingSvc] + gh
+    let ms = machines(all.map { Row(server: $0, health: health($0, t, alerts: [])) })
+    check(ms.count == 5 && ms.first { $0.name == "staging-1" }?.rows.count == 2, "service and host rows of one machine merge")
+    check(ms[0].name == "thrillo-partners-prod-app-server-3" && ms[1].name == "thrillophilia-admin-server", "worst machines first, then by name")
+    let cats = categorised(ms)
+    check(cats.map(\.0) == ["App servers", "Web & UI", "Data stores", "Staging"], "categories in fixed order, empty ones skipped")
+    check(cats[0].1.map(\.name).sorted() == ["atlas-prod-app-server", "thrillo-partners-prod-app-server-3"]
+          && cats[1].1.map(\.name) == ["thrillophilia-admin-server"] && cats[2].1.map(\.name) == ["thrillo-prod-redis-server"], "machines land in the right role")
+    check(category(Machine(name: "sentry")) == "Tooling" && category(Machine(name: "thrillo-prod-next-ui")) == "Web & UI"
+          && category(Machine(name: "x")) == "Other", "role keywords")
+    check(ms.first { $0.name == "thrillophilia-admin-server" }?.why == "no data for 6 min · CPU 100% · disk 95% full · load 2.1 per core"
+          && ms.first { $0.name == "thrillophilia-admin-server" }?.link == "https://g.example/d/infra-fleet", "machine reason and link come from its rows")
+
     check(labelText(unhealthy: 0, hasData: true, error: nil) == "OK", "label when all healthy")
     check(labelText(unhealthy: 2, hasData: true, error: "x") == "2", "label shows the count even when the last poll failed")
     check(labelText(unhealthy: 0, hasData: false, error: "x") == "?", "label before any data")
