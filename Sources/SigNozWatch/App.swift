@@ -211,13 +211,14 @@ struct Panel: View {
         Card {
             Text("SigNoz").fontWeight(.semibold)
             TextField("https://signoz.example.com", text: $url).textFieldStyle(.roundedBorder)
-            SecureField("API key (Settings › API Keys in SigNoz)", text: $key).textFieldStyle(.roundedBorder)
+            // ponytail: SecureField in the menu bar window keeps the pasted text out of the binding; a plain field saves it.
+            TextField("API key (Settings › API Keys in SigNoz)", text: $key).textFieldStyle(.roundedBorder).font(.system(.caption, design: .monospaced))
             Text("Stored in this app's preferences only. Prefilled from the SigNoz MCP server in ~/.claude.json when present.")
                 .font(.caption2).foregroundStyle(.secondary)
             Divider()
             Text("Grafana (optional: hosts from its Prometheus datasource)").fontWeight(.semibold)
             TextField("https://grafana.example.com", text: $grafanaURL).textFieldStyle(.roundedBorder)
-            SecureField("Service account token (glsa_…), or your Grafana user:password", text: $grafanaKey).textFieldStyle(.roundedBorder)
+            TextField("Service account token (glsa_…), or your Grafana user:password", text: $grafanaKey).textFieldStyle(.roundedBorder).font(.system(.caption, design: .monospaced))
                 .onChange(of: grafanaURL) { _, _ in UserDefaults.standard.removeObject(forKey: "grafanaDS") }
             Divider()
             Text("Limits").fontWeight(.semibold)
