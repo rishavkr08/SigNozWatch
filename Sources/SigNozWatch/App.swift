@@ -160,7 +160,7 @@ struct Panel: View {
     var panelHeight: CGFloat {
         let machines = model.categories.map { CGFloat($0.1.count) * 120 + 44 }.max() ?? 60
         let alerts = 150 + CGFloat(model.firing.count) * 46 + CGFloat(min(model.events.count, 8)) * 40
-        let chrome: CGFloat = 116 + (model.snap.error == nil ? 0 : 24) + (showSettings || url.isEmpty || key.isEmpty ? 420 : 0)
+        let chrome: CGFloat = 134 + (model.snap.error == nil ? 0 : 24) + (showSettings || url.isEmpty || key.isEmpty ? 420 : 0)
         return min(max(max(machines, alerts) + chrome, 320), 780)
     }
     var current: String { tabs.contains(tab) ? tab : tabs[0] }
