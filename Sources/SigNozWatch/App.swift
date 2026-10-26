@@ -156,10 +156,18 @@ struct Panel: View {
     @State private var tab = ""
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     var tabs: [String] { model.categories.map(\.0) + ["Alerts"] }
+    /// Estimated content height of the tallest tab: a machine block is a row plus three rings; the alerts tab lists rules and events.
+    var panelHeight: CGFloat {
+        let machines = model.categories.map { CGFloat($0.1.count) * 120 + 44 }.max() ?? 60
+        let alerts = 150 + CGFloat(model.firing.count) * 46 + CGFloat(min(model.events.count, 8)) * 40
+        let chrome: CGFloat = 116 + (model.snap.error == nil ? 0 : 24) + (showSettings || url.isEmpty || key.isEmpty ? 420 : 0)
+        return min(max(max(machines, alerts) + chrome, 320), 780)
+    }
     var current: String { tabs.contains(tab) ? tab : tabs[0] }
 
     var body: some View {
-        // Fixed size on purpose: a MenuBarExtra window that grows with its content drifts off screen when it shrinks again.
+        // Fixed size on purpose: a MenuBarExtra window that follows its content drifts off screen when it shrinks again.
+        // So the height fits the tallest tab and only changes when the fleet or the settings card does, never on a tab switch.
         VStack(alignment: .leading, spacing: 10) {
             header
             ScrollView(.vertical) {
@@ -184,7 +192,7 @@ struct Panel: View {
             footer
         }
         .padding(12)
-        .frame(width: 640, height: 680)
+        .frame(width: 640, height: panelHeight)
         // A menu bar app's panel never becomes the key window on its own, so text fields ignore typing and paste
         // until the app is activated. Do it on every open; Esc or a click outside still closes the panel.
         .onAppear { NSApp.activate(ignoringOtherApps: true) }
