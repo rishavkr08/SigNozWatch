@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SigNozWatch for Mac</title>
+<meta name="description" content="A tiny menu bar app that shows what is slowing your Mac down and lets you stop it in one click.">
+<style>
+  :root {
+    --bg: #f5f5f7;
+    --surface: #ffffff;
+    --text: #1d1d1f;
+    --muted: #5e5e63;
+    --line: rgba(0, 0, 0, 0.09);
+    --accent: #2457c5;
+    --accent-text: #ffffff;
+    --code-bg: #eef0f4;
+    --hero-from: #24365e;
+    --hero-to: #0d1529;
+    --ok: #1f9d47;
+    --warn: #c66a00;
+    --bad: #d92d20;
+    --ring-track: rgba(0, 0, 0, 0.08);
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111216;
+      --surface: #1b1c21;
+      --text: #f2f2f5;
+      --muted: #a4a4ab;
+      --line: rgba(255, 255, 255, 0.1);
+      --accent: #5b8def;
+      --accent-text: #0b1020;
+      --code-bg: #24262d;
+      --ring-track: rgba(255, 255, 255, 0.1);
+      --ok: #34c759;
+      --warn: #ff9f0a;
+      --bad: #ff453a;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #111216;
+    --surface: #1b1c21;
+    --text: #f2f2f5;
+    --muted: #a4a4ab;
+    --line: rgba(255, 255, 255, 0.1);
+    --accent: #5b8def;
+    --accent-text: #0b1020;
+    --code-bg: #24262d;
+    --ring-track: rgba(255, 255, 255, 0.1);
+    --ok: #34c759;
+    --warn: #ff9f0a;
+    --bad: #ff453a;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 24px; }
+
+  header.top { display: flex; align-items: center; justify-content: space-between; padding: 20px 0; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; font-size: 17px; color: var(--text); text-decoration: none; }
+  .theme-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 40px; height: 40px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--surface); color: var(--text); cursor: pointer;
+  }
+  .theme-btn:focus-visible, .btn:focus-visible, .copy:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+  .hero { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr); gap: 48px; align-items: center; padding: 40px 0 64px; }
+  h1 { font-size: clamp(34px, 5vw, 52px); line-height: 1.08; letter-spacing: -0.02em; margin: 0 0 16px; }
+  .lede { font-size: 19px; color: var(--muted); margin: 0 0 28px; max-width: 34em; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 10px; min-height: 48px; padding: 0 22px;
+    border-radius: 12px; background: var(--accent); color: var(--accent-text);
+    font-weight: 650; font-size: 16px; text-decoration: none;
+  }
+  .btn:hover { filter: brightness(1.08); }
+  .btn.secondary { background: var(--surface); color: var(--text); border: 1px solid var(--line); min-height: 44px; font-weight: 600; }
+  .btn.secondary:hover { filter: none; background: var(--code-bg); }
+  .pill { display: inline-block; margin-left: 6px; padding: 1px 8px; border-radius: 999px; background: var(--accent); color: var(--accent-text); font-size: 11.5px; font-weight: 650; vertical-align: 1px; }
+  .or.alt { margin-top: 28px; }
+  .cmd.primary { border: 1.5px solid var(--accent); background: var(--surface); }
+  .cmd.primary .copy { background: var(--accent); color: var(--accent-text); border-color: transparent; }
+  .fixes { margin: 10px 0 0; padding-left: 20px; display: grid; gap: 6px; }
+  .meta { font-size: 13.5px; color: var(--muted); margin: 12px 0 28px; }
+  .or { font-size: 14px; font-weight: 600; margin: 0 0 8px; }
+  .cmd {
+    display: flex; align-items: center; gap: 8px; background: var(--code-bg); border: 1px solid var(--line);
+    border-radius: 10px; padding: 6px 6px 6px 14px; max-width: 560px;
+  }
+  .cmd code { flex: 1 1 auto; min-width: 0; overflow-x: auto; white-space: nowrap; font: 13px/1.6 ui-monospace, "SF Mono", Menlo, monospace; padding: 6px 0; }
+  .copy {
+    flex: none; min-height: 34px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--surface); color: var(--text); font: 600 13px -apple-system, system-ui, sans-serif; cursor: pointer;
+  }
+  .hint { font-size: 13.5px; color: var(--muted); margin: 8px 0 0; max-width: 560px; }
+
+  .shot { position: relative; border-radius: 22px; padding: 18px; background: linear-gradient(160deg, var(--hero-from), var(--hero-to)); }
+  .menubar { display: flex; justify-content: flex-end; align-items: center; gap: 14px; height: 30px; padding: 0 12px; border-radius: 8px; background: rgba(255,255,255,0.14); color: #fff; font-size: 13px; font-weight: 500; }
+  .menubar > span { white-space: nowrap; }
+  .menubar .item { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 6px; background: rgba(255,255,255,0.18); font-variant-numeric: tabular-nums; }
+  .dotc { width: 9px; height: 9px; border-radius: 50%; background: #ff453a; }
+  .panel { margin: 10px 0 0 auto; width: min(100%, 380px); background: var(--surface); color: var(--text); border-radius: 14px; padding: 14px; box-shadow: 0 18px 40px rgba(0,0,0,0.35); }
+  .rings { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; text-align: center; font-size: 12px; }
+  .rings .lbl { font-weight: 600; }
+  .rings .sub { color: var(--muted); font-size: 11px; }
+  .bars { margin-top: 12px; display: grid; gap: 8px; font-size: 12.5px; }
+  .bar { display: grid; grid-template-columns: 112px minmax(0, 1fr) 52px; gap: 8px; align-items: center; }
+  .bar .track { height: 10px; border-radius: 5px; background: var(--ring-track); overflow: hidden; }
+  .bar .fill { height: 10px; border-radius: 5px; }
+  .bar .val { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .tag { display: block; color: #4b4acf; font-size: 10.5px; font-weight: 650; }
+  :root[data-theme="dark"] .tag { color: #a5a4ff; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .tag { color: #a5a4ff; } }
+
+  section { padding: 56px 0; border-top: 1px solid var(--line); }
+  h2 { font-size: 28px; letter-spacing: -0.01em; margin: 0 0 24px; }
+  .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 20px 22px; }
+  .card h3 { margin: 0 0 6px; font-size: 17px; }
+  .card p { margin: 0; color: var(--muted); font-size: 15px; }
+
+  ol.steps { margin: 0; padding: 0; list-style: none; counter-reset: s; display: grid; gap: 14px; max-width: 720px; }
+  ol.steps li { counter-increment: s; display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 12px; }
+  ol.steps li::before {
+    content: counter(s); display: inline-flex; align-items: center; justify-content: center;
+    width: 30px; height: 30px; border-radius: 50%; background: var(--code-bg); font-weight: 650; font-size: 14px;
+  }
+  .note { margin-top: 20px; max-width: 720px; padding: 14px 16px; border-radius: 12px; background: var(--code-bg); font-size: 14.5px; }
+  kbd { font: 600 13px -apple-system, system-ui, sans-serif; padding: 1px 6px; border-radius: 5px; border: 1px solid var(--line); background: var(--surface); }
+
+  footer { padding: 32px 0 48px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; display: flex; flex-wrap: wrap; gap: 8px 20px; justify-content: space-between; }
+
+  @media (max-width: 820px) {
+    .hero { grid-template-columns: minmax(0, 1fr); gap: 32px; padding-top: 16px; }
+    .grid { grid-template-columns: minmax(0, 1fr); }
+    .wrap { padding: 0 16px; }
+  }
+  @media (max-width: 480px) {
+    .shot { padding: 10px; }
+    .menubar .clock { display: none; }
+    .panel { padding: 12px; }
+    .bar { grid-template-columns: 92px minmax(0, 1fr) 50px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="#">
+      <svg width="34" height="34" viewBox="0 0 1024 1024" aria-hidden="true">
+        <defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1e7bff"/><stop offset="1" stop-color="#0b3f96"/></linearGradient></defs>
+        <rect width="1024" height="1024" rx="229" fill="url(#bg)"/>
+        <circle cx="512" cy="434" r="250" fill="none" stroke="#fff" stroke-width="62"/>
+        <circle cx="512" cy="434" r="96" fill="#34c759"/>
+        <polyline points="150,834 330,834 400,759 470,899 540,784 600,834 874,834" fill="none" stroke="#fff" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      SigNozWatch
+    </a>
+    <button class="theme-btn" id="theme" type="button" aria-label="Switch to dark theme">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+    </button>
+  </header>
+
+  <main>
+    <div class="hero">
+      <div>
+        <h1>Every server's health, in the menu bar.</h1>
+        <p class="lede">A tiny menu bar app for SigNoz and Grafana. Error rate, latency, CPU, memory and disk for each machine, grouped by role, with an alert that stays on screen when one turns red.</p>
+        <p class="or">Install with one command <span class="pill">Recommended</span></p>
+        <div class="cmd primary">
+          <code id="cmd">curl -fsSL https://github.com/rishavkr08/SigNozWatch/releases/latest/download/install.sh | sh</code>
+          <button class="copy" id="copy" type="button">Copy</button>
+        </div>
+        <p class="hint">Open Terminal: press <kbd>⌘</kbd> <kbd>Space</kbd>, type <strong>Terminal</strong> and press Return. Paste the command and press Return. It installs SigNozWatch to Applications and opens it, with no security warning. Run it again any time to update. Then open <strong>Settings…</strong> in the panel and paste your SigNoz API key.</p>
+        <p class="meta">Version 1.0 · macOS 14 Sonoma or later · Apple silicon and Intel · 1 MB</p>
+
+        <p class="or alt">Or download the app</p>
+        <a class="btn secondary" href="https://github.com/rishavkr08/SigNozWatch/releases/latest/download/SigNozWatch.dmg">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+          Download SigNozWatch.dmg
+        </a>
+        <p class="hint">macOS warns that it cannot check the app the first time you open it. <a href="#install">How to open it</a>.</p>
+      </div>
+
+      <figure class="shot" aria-label="SigNozWatch in the menu bar with its panel open, showing an app server with its CPU, memory and disk rings">
+        <div class="menubar">
+          <span aria-hidden="true">Wi‑Fi</span>
+          <span class="item"><span class="dotc"></span>3</span>
+          <span class="clock" aria-hidden="true">Mon 26 Oct 11:58</span>
+        </div>
+        <div class="panel">
+          <div class="bars" style="margin-bottom:10px">
+            <div class="bar" style="grid-template-columns:1fr;font-size:12px"><span><strong>App servers (2)</strong> · Web &amp; UI (1) · Data stores (1) · Tooling (1) · Staging · Alerts (1)</span></div>
+            <div class="bar"><span><strong>thrillo-partners-prod-app-server-3</strong><span class="tag" style="color:var(--warn)">Sidekiq job failures spiking</span></span><span class="val">1454/s · 0.3% err · p99 331 ms</span></div>
+          </div>
+          <div class="rings">
+            <div>
+              <svg width="70" height="70" viewBox="0 0 84 84" aria-hidden="true"><circle cx="42" cy="42" r="34" fill="none" stroke="var(--ring-track)" stroke-width="9"/><circle cx="42" cy="42" r="34" fill="none" stroke="var(--ok)" stroke-width="9" stroke-linecap="round" stroke-dasharray="213.6" stroke-dashoffset="134.6" transform="rotate(-90 42 42)"/><text x="42" y="48" text-anchor="middle" font-size="17" font-weight="650" fill="currentColor">37%</text></svg>
+              <div class="lbl">CPU</div><div class="sub">load 1.4 per core</div>
+            </div>
+            <div>
+              <svg width="70" height="70" viewBox="0 0 84 84" aria-hidden="true"><circle cx="42" cy="42" r="34" fill="none" stroke="var(--ring-track)" stroke-width="9"/><circle cx="42" cy="42" r="34" fill="none" stroke="var(--warn)" stroke-width="9" stroke-linecap="round" stroke-dasharray="213.6" stroke-dashoffset="44.9" transform="rotate(-90 42 42)"/><text x="42" y="48" text-anchor="middle" font-size="17" font-weight="650" fill="var(--warn)">79%</text></svg>
+              <div class="lbl">Memory</div><div class="sub">limit 90%</div>
+            </div>
+            <div>
+              <svg width="70" height="70" viewBox="0 0 84 84" aria-hidden="true"><circle cx="42" cy="42" r="34" fill="none" stroke="var(--ring-track)" stroke-width="9"/><circle cx="42" cy="42" r="34" fill="none" stroke="var(--ok)" stroke-width="9" stroke-linecap="round" stroke-dasharray="213.6" stroke-dashoffset="145.2" transform="rotate(-90 42 42)"/><text x="42" y="48" text-anchor="middle" font-size="17" font-weight="650" fill="currentColor">32%</text></svg>
+              <div class="lbl">Root disk</div><div class="sub">from Grafana</div>
+            </div>
+          </div>
+        </div>
+      </figure>
+    </div>
+
+    <section aria-labelledby="what">
+      <h2 id="what">What it does</h2>
+      <div class="grid">
+        <div class="card"><h3>One row per machine</h3><p>Services from SigNoz traces and hosts from Grafana's Prometheus merge into one row each: requests, error rate, p99, CPU, memory, root disk and load, with three rings underneath.</p></div>
+        <div class="card"><h3>Grouped by role</h3><p>Tabs for app servers, web and UI, data stores, tooling and staging, each counting its unhealthy machines. The menu bar dot shows the worst of them all.</p></div>
+        <div class="card"><h3>Red, orange, green</h3><p>Orange within 80% of a limit or when a warning rule fires, red over a limit, on a critical rule, or when a machine stops reporting. Limits are yours to set in the panel.</p></div>
+        <div class="card"><h3>Alerts that wait for you</h3><p>A notification when a machine turns red or a SigNoz rule starts firing, once per cooldown. Click it to open that machine in SigNoz or Grafana.</p></div>
+      </div>
+    </section>
+
+    <section aria-labelledby="install">
+      <h2 id="install">Installing the downloaded app</h2>
+      <ol class="steps">
+        <li><span>Open <strong>SigNozWatch.dmg</strong> and drag SigNozWatch into the Applications folder.</span></li>
+        <li><span>Open SigNozWatch from Applications. A dot appears in the menu bar.</span></li>
+        <li><span>When macOS asks whether SigNozWatch may send notifications, click <strong>Allow</strong>. In System Settings › Notifications, set its style to <strong>Alerts</strong> so they stay until you close them.</span></li>
+        <li><span>Click the dot, open <strong>Settings…</strong> and paste your SigNoz URL and API key (SigNoz › Settings › API Keys, Viewer role). Optionally add your Grafana URL with a service-account token or your own <code>user:password</code>.</span></li>
+        <li><span>Tick <strong>Launch at login</strong> in the panel's footer.</span></li>
+      </ol>
+      <div class="note">
+        <strong>If macOS says “SigNozWatch” can’t be opened because Apple cannot check it,</strong> click <kbd>OK</kbd>, then:
+        <ul class="fixes">
+          <li><strong>macOS 14 Sonoma:</strong> in Applications, Control-click SigNozWatch, choose <kbd>Open</kbd>, then click <kbd>Open</kbd> in the dialog.</li>
+          <li><strong>macOS 15 or later:</strong> open <kbd>System Settings</kbd> › <kbd>Privacy &amp; Security</kbd>, scroll to the message about SigNozWatch, and click <kbd>Open Anyway</kbd>.</li>
+        </ul>
+        <p style="margin: 10px 0 0">You only do this once. The warning appears because SigNozWatch is not notarized by Apple yet. The one-command install above avoids it.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span>SigNozWatch is free and has no tracking. It talks only to the SigNoz and Grafana you configure; keys stay in the app's preferences on your Mac.</span>
+    <span><a href="https://github.com/rishavkr08/SigNozWatch/releases/latest">Release notes and checksums</a></span>
+  </footer>
+</div>
+
+<script>
+  (function () {
+    var root = document.documentElement, btn = document.getElementById('theme');
+    var moon = '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>';
+    var sun = '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>';
+    try { var saved = localStorage.getItem('syswatch-theme'); if (saved === 'light' || saved === 'dark') root.setAttribute('data-theme', saved); } catch (e) {}
+    function current() {
+      var t = root.getAttribute('data-theme');
+      return t || (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    }
+    function paint() {
+      var next = current() === 'dark' ? 'light' : 'dark';
+      btn.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+      btn.querySelector('svg').innerHTML = next === 'dark' ? moon : sun;
+    }
+    btn.addEventListener('click', function () {
+      var next = current() === 'dark' ? 'light' : 'dark';
+      root.setAttribute('data-theme', next);
+      try { localStorage.setItem('syswatch-theme', next); } catch (e) {}
+      paint();
+    });
+    if (window.matchMedia) matchMedia('(prefers-color-scheme: dark)').addEventListener('change', paint);
+    paint();
+
+    var copy = document.getElementById('copy');
+    copy.addEventListener('click', function () {
+      var text = document.getElementById('cmd').textContent;
+      (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject()).then(function () {
+        copy.textContent = 'Copied';
+        setTimeout(function () { copy.textContent = 'Copy'; }, 1600);
+      }, function () {
+        var r = document.createRange(); r.selectNodeContents(document.getElementById('cmd'));
+        var s = getSelection(); s.removeAllRanges(); s.addRange(r);
+        copy.textContent = 'Press ⌘C';
+      });
+    });
+  })();
+</script>
+</body>
+</html>
