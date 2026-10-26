@@ -10,7 +10,7 @@ Menu bar status of every server in your SigNoz, for macOS 14+. Native Swift/Swif
 
 ## Install
 
-Paste this into Terminal. It downloads the latest release, checks its checksum, installs it to /Applications and opens it, with no security prompt:
+**Download:** [rishavkr08.github.io/SigNozWatch](https://rishavkr08.github.io/SigNozWatch/). Or paste this into Terminal. It downloads the latest release, checks its checksum, installs it to /Applications and opens it, with no security prompt:
 
 ```sh
 curl -fsSL https://github.com/rishavkr08/SigNozWatch/releases/latest/download/install.sh | sh
