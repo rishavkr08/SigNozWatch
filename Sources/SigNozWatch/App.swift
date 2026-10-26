@@ -1,5 +1,6 @@
 import SwiftUI
 import ServiceManagement
+import UserNotifications
 
 // MARK: - Severity colours (same scheme as SysWatch)
 
@@ -99,6 +100,7 @@ struct SigNozWatchApp: App {
     init() {
         if CommandLine.arguments.contains("--check") { selfCheck(); exit(0) }
         if CommandLine.arguments.contains("--once") { pollOnce() }
+        if CommandLine.arguments.contains("--notify-test") { notifyTest() }
     }
 
     var body: some Scene {
@@ -109,6 +111,28 @@ struct SigNozWatchApp: App {
         }
         .menuBarExtraStyle(.window)
     }
+}
+
+/// `SigNozWatch --notify-test`: prints the notification permission and posts one sample notification from this process.
+/// Notification Center only shows the app icon for the copy macOS launched from /Applications, but the banner itself shows either way.
+func notifyTest() -> Never {
+    let a = Alerter()
+    a.setup()
+    UNUserNotificationCenter.current().getNotificationSettings { s in
+        let name: String
+        switch s.authorizationStatus {
+        case .authorized: name = "authorized"
+        case .provisional: name = "provisional (quiet, Notification Center only)"
+        case .denied: name = "DENIED: turn SigNozWatch on in System Settings › Notifications"
+        case .notDetermined: name = "NOT DETERMINED: macOS has not shown the permission prompt yet, or it was dismissed"
+        @unknown default: name = "unknown"
+        }
+        print("permission: \(name); alerts \(s.alertSetting == .enabled ? "on" : "off"), banners \(s.alertStyle == .none ? "off" : "on"), sound \(s.soundSetting == .enabled ? "on" : "off")")
+    }
+    a.check([], firing: [Alert(id: "test", name: "SigNozWatch test notification", severity: "warning", env: "", state: "firing",
+                                 detail: "If you can read this, notifications work. Click to open SigNoz.", text: "")], Thresholds())
+    RunLoop.main.run(until: Date().addingTimeInterval(3))
+    exit(0)
 }
 
 /// `SigNozWatch --once`: one poll printed to the terminal, to check the URL and key without the menu bar.
@@ -156,18 +180,12 @@ struct Panel: View {
     @State private var tab = ""
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     var tabs: [String] { model.categories.map(\.0) + ["Alerts"] }
-    /// Estimated content height of the tallest tab: a machine block is a row plus three rings; the alerts tab lists rules and events.
-    var panelHeight: CGFloat {
-        let machines = model.categories.map { CGFloat($0.1.count) * 120 + 44 }.max() ?? 60
-        let alerts = 150 + CGFloat(model.firing.count) * 46 + CGFloat(min(model.events.count, 8)) * 40
-        let chrome: CGFloat = 134 + (model.snap.error == nil ? 0 : 24) + (showSettings || url.isEmpty || key.isEmpty ? 420 : 0)
-        return min(max(max(machines, alerts) + chrome, 320), 780)
-    }
+    @State private var contentHeight: CGFloat = 0   // tallest tab content measured so far
     var current: String { tabs.contains(tab) ? tab : tabs[0] }
 
     var body: some View {
-        // Fixed size on purpose: a MenuBarExtra window that follows its content drifts off screen when it shrinks again.
-        // So the height fits the tallest tab and only changes when the fleet or the settings card does, never on a tab switch.
+        // A MenuBarExtra window that shrinks drifts away from the menu bar, so the scroll area keeps the height of the
+        // tallest tab it has shown (measured, not estimated) and only lets go of it when the settings card closes.
         VStack(alignment: .leading, spacing: 10) {
             header
             ScrollView(.vertical) {
@@ -187,12 +205,16 @@ struct Panel: View {
                     }
                 }
                 .frame(maxWidth: .infinity)
+                .background(GeometryReader { g in Color.clear.preference(key: HeightKey.self, value: g.size.height) })
             }
+            .frame(height: min(max(contentHeight, 120), 640))
+            .onPreferenceChange(HeightKey.self) { h in contentHeight = max(contentHeight, h) }
+            .onChange(of: showSettings) { _, on in if !on { contentHeight = 0 } }
             Divider()
             footer
         }
         .padding(12)
-        .frame(width: 640, height: panelHeight)
+        .frame(width: 640)
         // A menu bar app's panel never becomes the key window on its own, so text fields ignore typing and paste
         // until the app is activated. Do it on every open; Esc or a click outside still closes the panel.
         .onAppear { NSApp.activate(ignoringOtherApps: true) }
@@ -266,6 +288,11 @@ struct Panel: View {
         }
         .font(.callout)
     }
+}
+
+struct HeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
 struct Card<Content: View>: View {
