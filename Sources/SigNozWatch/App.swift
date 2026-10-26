@@ -175,6 +175,7 @@ struct Panel: View {
     @AppStorage("staleSec") private var staleSec = 120.0
     @AppStorage("grafanaURL") private var grafanaURL = ""
     @AppStorage("grafanaKey") private var grafanaKey = ""
+    @AppStorage("serverIPs") private var serverIPs = ""
     @AppStorage("cooldownMin") private var cooldownMin = 30.0
     @AppStorage("pollSec") private var pollSec = 60.0
     @State private var showSettings = false
@@ -258,6 +259,12 @@ struct Panel: View {
             TextField("Service account token (glsa_…), or your Grafana user:password", text: $grafanaKey).textFieldStyle(.roundedBorder).font(.system(.caption, design: .monospaced))
                 .onChange(of: grafanaURL) { _, _ in UserDefaults.standard.removeObject(forKey: "grafanaDS") }
             Divider()
+            Text("Server IPs").fontWeight(.semibold)
+            TextField("thrillo-partners-prod-app-server-3 10.0.0.12   (one per line; hostname or Grafana label, then the IP)", text: $serverIPs, axis: .vertical)
+                .textFieldStyle(.roundedBorder).font(.system(.caption, design: .monospaced)).lineLimit(3...8)
+            Text("Shown next to each machine with a copy button. Nothing in SigNoz or Prometheus reports addresses, so they live here.")
+                .font(.caption2).foregroundStyle(.secondary)
+            Divider()
             Text("Limits").fontWeight(.semibold)
             Stepper("Error rate ≥ \(fmt(errPct))%", value: $errPct, in: 0.5...50, step: 0.5)
             Stepper("p99 latency ≥ \(fmtMs(p99Ms))", value: $p99Ms, in: 100...30000, step: 100)
@@ -334,6 +341,8 @@ struct CategoryCard: View {
 struct MachineRow: View {
     let m: Machine
     @ObservedObject var model: Model
+    @AppStorage("serverIPs") private var serverIPs = ""
+    @State private var copied = false
 
     var body: some View {
         let t = model.thresholds
@@ -341,6 +350,18 @@ struct MachineRow: View {
             Circle().fill(m.sev.color).frame(width: 9, height: 9)
             VStack(alignment: .leading, spacing: 1) {
                 Text(m.name).fontWeight(m.sev == .ok ? .medium : .semibold).lineLimit(1).truncationMode(.middle)
+                if let ip = m.ip(in: ipMap(serverIPs)) {
+                    HStack(spacing: 4) {
+                        Text(ip).font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(ip, forType: .string)
+                            copied = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+                        } label: { Image(systemName: copied ? "checkmark" : "doc.on.doc").font(.caption2) }
+                            .buttonStyle(.plain).foregroundStyle(copied ? .green : .secondary).help("Copy IP")
+                    }
+                }
                 Text(m.sev == .ok ? detail : m.why).font(.caption2).foregroundStyle(m.sev == .ok ? .secondary : m.sev.color).lineLimit(2)
             }
             .frame(width: 180, alignment: .leading)

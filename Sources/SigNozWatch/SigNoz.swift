@@ -135,6 +135,25 @@ func machines(_ rows: [Row]) -> [Machine] {
     return byName.values.sorted { ($0.sev, $1.name) > ($1.sev, $0.name) }
 }
 
+/// Settings › Server IPs: one "<hostname or short label> <ip>" per line; "#" starts a comment. Nothing in SigNoz or
+/// Prometheus carries the addresses, so they are typed once here.
+func ipMap(_ text: String) -> [String: String] {
+    var out: [String: String] = [:]
+    for line in text.split(whereSeparator: \.isNewline) {
+        let parts = line.split(separator: "#").first?.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "=" || $0 == "," }) ?? []
+        if parts.count >= 2 { out[String(parts[0]).lowercased()] = String(parts[1]) }
+    }
+    return out
+}
+
+extension Machine {
+    /// By full hostname first, then by the short label Grafana knows the box as.
+    func ip(in map: [String: String]) -> String? {
+        let label = host?.server.os.components(separatedBy: " · ").first ?? ""
+        return map[name.lowercased()] ?? (label.isEmpty ? nil : map[label.lowercased()])
+    }
+}
+
 let categoryOrder = ["App servers", "Web & UI", "Data stores", "Tooling", "Staging", "Other"]
 
 /// ponytail: role from the hostname and Grafana's short label; extend the keyword lists when a new kind of box appears.

@@ -6,6 +6,7 @@ Menu bar status of every server in your SigNoz, for macOS 14+. Native Swift/Swif
 - **Panel:** a tab per role (App servers, Web & UI, Data stores, Tooling, Staging, Alerts). One row per machine with three rings under it: CPU, memory and root disk for hosts, or requests, errors and p99 for trace-only machines. A row merges the machine's trace numbers (service, environment, requests/s, error rate, p99) with its host numbers (CPU, memory, disk, load). Then SigNoz alert rules (firing first) and the notifications sent. Every row has a one-line reason and a link into SigNoz or Grafana. Roles come from a keyword table in `category()`.
 - **Colours:** orange within 80% of a limit or a warning alert, red over a limit, a critical alert, a host that stopped sending metrics or a server that disappeared from SigNoz.
 - **Grafana, optional:** paste a Grafana URL and a Viewer service-account token (or, without Admin rights, your own `user:password`) under Settings… and every host in its Prometheus datasource (node exporter) joins the Host metrics card with CPU, memory, root disk, load per core and seconds since the last scrape. The token is only in the app's preferences.
+- **Server IPs:** nothing in SigNoz or Prometheus reports addresses, so paste them once under Settings… (`hostname ip`, one per line). Each machine then shows its IP with a copy button.
 - **Notifications** when a server turns red or a rule starts firing, at most once per cooldown (30 min by default). Clicking one opens it in SigNoz.
 
 ## Install

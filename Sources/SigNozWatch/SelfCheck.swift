@@ -87,6 +87,12 @@ func selfCheck() {
     check(ms.first { $0.name == "thrillophilia-admin-server" }?.why == "no data for 6 min · CPU 100% · disk 95% full · load 2.1 per core"
           && ms.first { $0.name == "thrillophilia-admin-server" }?.link == "https://g.example/d/infra-fleet", "machine reason and link come from its rows")
 
+    let ips = ipMap("thrillo-partners-prod-app-server-3 10.0.0.12\n# comment\nadmin-ui=10.0.0.20  # the admin box\nbad-line\n\nStaging-1, 10.0.0.30")
+    check(ips == ["thrillo-partners-prod-app-server-3": "10.0.0.12", "admin-ui": "10.0.0.20", "staging-1": "10.0.0.30"], "ip map parse: spaces, =, commas, comments, junk")
+    check(ms.first { $0.name == "thrillo-partners-prod-app-server-3" }?.ip(in: ips) == "10.0.0.12"
+          && ms.first { $0.name == "thrillophilia-admin-server" }?.ip(in: ips) == "10.0.0.20"
+          && ms.first { $0.name == "thrillo-prod-redis-server" }?.ip(in: ips) == nil, "ip by hostname, by Grafana label, or none")
+
     check(labelText(unhealthy: 0, hasData: true, error: nil) == "OK", "label when all healthy")
     check(labelText(unhealthy: 2, hasData: true, error: "x") == "2", "label shows the count even when the last poll failed")
     check(labelText(unhealthy: 0, hasData: false, error: "x") == "?", "label before any data")
