@@ -186,7 +186,7 @@ struct Panel: View {
 
     var body: some View {
         // A MenuBarExtra window that shrinks drifts away from the menu bar, so the scroll area keeps the height of the
-        // tallest tab it has shown (measured, not estimated) and only lets go of it when the settings card closes.
+        // tallest content it has shown (measured, not estimated) and never shrinks.
         VStack(alignment: .leading, spacing: 10) {
             header
             ScrollView(.vertical) {
@@ -194,11 +194,12 @@ struct Panel: View {
                     if let e = model.snap.error {
                         Label(e, systemImage: "exclamationmark.triangle").font(.callout).foregroundStyle(.orange).lineLimit(3)
                     }
-                    if showSettings || url.isEmpty || key.isEmpty { settingsCard }
-                    if model.machines.isEmpty && model.snap.error == nil {
+                    // Settings take the place of the tab content, so opening or closing them never resizes the window.
+                    if showSettings || url.isEmpty || key.isEmpty {
+                        settingsCard
+                    } else if model.machines.isEmpty && model.snap.error == nil {
                         Card { Text("No machine sent traces or host metrics in the last \(windowMinutes) min").font(.callout).foregroundStyle(.secondary) }
-                    }
-                    if current == "Alerts" {
+                    } else if current == "Alerts" {
                         AlertsCard(model: model)
                         EventsCard(model: model)
                     } else if let group = model.categories.first(where: { $0.0 == current }) {
@@ -210,7 +211,6 @@ struct Panel: View {
             }
             .frame(height: min(max(contentHeight, 120), 640))
             .onPreferenceChange(HeightKey.self) { h in contentHeight = max(contentHeight, h) }
-            .onChange(of: showSettings) { _, on in if !on { contentHeight = 0 } }
             Divider()
             footer
         }
