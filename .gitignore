@@ -2,3 +2,4 @@
 SigNozWatch.app/
 .DS_Store
 .claude/
+dist/

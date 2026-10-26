@@ -8,13 +8,27 @@ Menu bar status of every server in your SigNoz, for macOS 14+. Native Swift/Swif
 - **Grafana, optional:** paste a Grafana URL and a Viewer service-account token (or, without Admin rights, your own `user:password`) under Settings… and every host in its Prometheus datasource (node exporter) joins the Host metrics card with CPU, memory, root disk, load per core and seconds since the last scrape. The token is only in the app's preferences.
 - **Notifications** when a server turns red or a rule starts firing, at most once per cooldown (30 min by default). Clicking one opens it in SigNoz.
 
-## Build and install
+## Install
+
+Paste this into Terminal. It downloads the latest release, checks its checksum, installs it to /Applications and opens it, with no security prompt:
+
+```sh
+curl -fsSL https://github.com/rishavkr08/SigNozWatch/releases/latest/download/install.sh | sh
+```
+
+Or download [SigNozWatch.dmg](https://github.com/rishavkr08/SigNozWatch/releases/latest/download/SigNozWatch.dmg) and drag it to Applications (then right-click, Open the first time, since the app is not notarized).
+
+Then click **Settings…** in the panel and paste your SigNoz API key (SigNoz › Settings › API Keys, Viewer role) and, optionally, the Grafana URL with a service-account token or your own `user:password`.
+
+### Build from source
 
 Needs Apple's Command Line Tools (`xcode-select --install`), not Xcode.
 
 ```sh
 ./build.sh --install
 ```
+
+`./release.sh` builds the universal app, DMG, zip and checksums into `dist/` for a GitHub release; set `DEVELOPER_ID` and `NOTARY_PROFILE` to sign and notarize.
 
 On first launch the app takes the SigNoz URL and API key from the SigNoz MCP server entry in `~/.claude.json` if there is one; otherwise paste them under **Settings…** in the panel. The key lives only in the app's preferences (`local.signozwatch.monitor`), never in this repo.
 
