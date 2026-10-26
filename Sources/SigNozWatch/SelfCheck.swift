@@ -59,17 +59,9 @@ func selfCheck() {
     guard let pv = try? Parse.prometheus(prom) else { check(false, "prometheus parse threw"); return }
     check(pv.count == 2 && pv[0].labels["server"] == "admin-ui" && pv[0].value == 100 && pv[1].value == 3.4, "prometheus vector parse (string values)")
     check((try? Parse.prometheus(rules)) == nil, "prometheus parser rejects the wrong shape")
-    let range = Data(#"""
-    {"status":"success","data":{"resultType":"matrix","result":[{"metric":{"instance":"thrillophilia-admin-server","server":"admin-ui"},"values":[[1793017000,"80"],[1793017060,"90.5"],[1793017120,"100"]]},
-     {"metric":{"instance":"thrillo-prod-redis-server","server":"redis"},"values":[[1793017000,"3"],[1793017060,"3.4"]]}]}}
-    """#.utf8)
-    guard let rv = try? Parse.prometheusRange(range) else { check(false, "prometheus range parse threw"); return }
-    check(rv.count == 2 && rv[0].values == [80, 90.5, 100] && rv[1].labels["server"] == "redis", "prometheus matrix parse")
     let one = { (v: Double) in [(labels: ["instance": "thrillophilia-admin-server", "server": "admin-ui"], value: v)] }
-    let oneR = { (v: [Double]) in [(labels: ["instance": "thrillophilia-admin-server", "server": "admin-ui"], values: v)] }
-    let (gh, ghist) = mergeHosts(instant: ["load": one(2.06), "stale": one(400)], ranges: ["cpu": rv, "mem": oneR([25, 20]), "disk": oneR([95])], link: "https://g.example/d/infra-fleet")
-    check(gh.count == 2 && gh[0].name == "thrillo-prod-redis-server" && gh[0].cpuPct == 3.4 && gh[0].diskPct == 0, "hosts merged per instance, sorted by name, current = last point")
-    check(ghist["host:thrillophilia-admin-server/cpu"] == [80, 90.5, 100] && ghist["host:thrillophilia-admin-server/mem"] == [25, 20] && ghist["host:thrillo-prod-redis-server/mem"] == nil, "chart history keyed by host and metric")
+    let gh = mergeHosts(["cpu": pv, "mem": one(20), "disk": one(95), "load": one(2.06), "stale": one(400)], link: "https://g.example/d/infra-fleet")
+    check(gh.count == 2 && gh[0].name == "thrillo-prod-redis-server" && gh[0].cpuPct == 3.4 && gh[0].diskPct == 0, "hosts merged per instance, sorted by name")
     let admin = gh[1]
     check(admin.os == "admin-ui · Grafana" && admin.memPct == 20 && admin.diskPct == 95 && admin.loadPerCore == 2.06 && admin.staleSec == 400
           && admin.id == "host:thrillophilia-admin-server" && admin.path == "https://g.example/d/infra-fleet", "merged host fields and link")

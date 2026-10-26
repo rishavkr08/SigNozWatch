@@ -1,8 +1,6 @@
 import SwiftUI
 import ServiceManagement
 
-let historySamples = chartMinutes   // own-poll history (SigNoz rows) at the default 60 s poll matches the Grafana range
-
 // MARK: - Severity colours (same scheme as SysWatch)
 
 enum Severity: Int, Comparable {
@@ -26,10 +24,8 @@ final class Model: ObservableObject {
     @Published var snap = Snapshot()
     @Published var fetching = false
     @Published var events: [AlertEvent] = []
-    @Published var hist: History = [:]
     @Published var known: [String] = UserDefaults.standard.stringArray(forKey: "knownServers") ?? []
     private var lastSigNoz: [Server] = [], lastGrafana: [Server] = [], lastAlerts: [Alert] = []   // last good answer per source
-    private var grafanaHist: History = [:]
     let alerter = Alerter()
     private var timer: Timer?
 
@@ -71,24 +67,15 @@ final class Model: ObservableObject {
         fetching = true
         defer { fetching = false }
         let signoz = Task { try await SigNozClient(config: c).fetch() }
-        let grafana = Task { c.grafanaSet ? try await GrafanaClient(config: c).hosts() : (hosts: [Server](), hist: History()) }
+        let grafana = Task { c.grafanaSet ? try await GrafanaClient(config: c).hosts() : [] }
         var errors: [String] = []
         do { let r = try await signoz.value; lastSigNoz = r.servers; lastAlerts = r.alerts } catch { errors.append("SigNoz: \(error.localizedDescription)") }
-        do { let g = try await grafana.value; lastGrafana = g.hosts; grafanaHist = g.hist } catch { errors.append("Grafana: \(error.localizedDescription)") }
+        do { lastGrafana = try await grafana.value } catch { errors.append("Grafana: \(error.localizedDescription)") }
         if errors.count == 2 && snap.servers.isEmpty { snap.error = errors.joined(separator: "\n"); return }
         let fresh = lastSigNoz.filter { s in !lastGrafana.contains { $0.id == s.id } } + lastGrafana   // same host in both: Grafana has more
         known = Array(Set(known).union(fresh.map(\.id))).sorted()
         UserDefaults.standard.set(known, forKey: "knownServers")
         snap = Snapshot(servers: merge(fresh, known: known), alerts: lastAlerts, date: Date(), error: errors.isEmpty ? nil : errors.joined(separator: "\n"))
-        // Grafana hosts bring a full hour from Prometheus; SigNoz rows accumulate one point per poll.
-        hist.merge(grafanaHist) { _, new in new }
-        for s in fresh where s.link.isEmpty {
-            let points = s.kind == .service ? ["rps": s.callRate, "err": s.errorPct, "p99": s.p99Ms] : ["cpu": s.cpuPct, "mem": s.memPct, "disk": s.diskPct]
-            for (k, v) in points {
-                hist["\(s.id)/\(k)", default: []].append(v)
-                if hist["\(s.id)/\(k)"]!.count > historySamples { hist["\(s.id)/\(k)"]!.removeFirst() }
-            }
-        }
         alerter.check(rows, firing: firing, thresholds)
     }
 
@@ -130,7 +117,7 @@ func pollOnce() -> Never {
         let c = Config.load()
         do {
             var (servers, alerts) = try await SigNozClient(config: c).fetch()
-            if c.grafanaSet { servers += try await GrafanaClient(config: c).hosts().hosts } else { print("Grafana: not configured") }
+            if c.grafanaSet { servers += try await GrafanaClient(config: c).hosts() } else { print("Grafana: not configured") }
             let rows = servers.map { Row(server: $0, health: health($0, .load(), alerts: alerts)) }
             for (cat, ms) in categorised(machines(rows)) {
                 print("== \(cat)")
@@ -296,12 +283,11 @@ struct CategoryCard: View {
             HStack {
                 Text(title).fontWeight(.semibold)
                 Spacer()
-                Text("\(machines.filter { $0.sev == .ok }.count) of \(machines.count) healthy · numbers last \(windowMinutes) min · charts last \(chartMinutes) min")
-                    .font(.caption).foregroundStyle(.secondary)
+                Text("\(machines.filter { $0.sev == .ok }.count) of \(machines.count) healthy · last \(windowMinutes) min").font(.caption).foregroundStyle(.secondary)
             }
             ForEach(machines) { m in
                 MachineRow(m: m, model: model)
-                MachineCharts(m: m, model: model)
+                MachineRings(m: m, model: model)
                 if m.id != machines.last?.id { Divider() }
             }
         }
@@ -367,70 +353,56 @@ struct MachineRow: View {
     }
 }
 
-/// Three charts under a machine: CPU, memory, root disk for hosts; requests, errors, p99 for trace-only machines.
-struct MachineCharts: View {
+/// Three rings under a machine: CPU, memory, root disk for hosts (share of 100%); errors and p99 against their limits
+/// plus the request rate for trace-only machines.
+struct MachineRings: View {
     let m: Machine
     @ObservedObject var model: Model
 
     var body: some View {
         let t = model.thresholds
-        HStack(spacing: 10) {
-            if let h = m.host {
-                chart("CPU", h.id, "cpu", limit: t.cpuPct, top: 100) { "\(Int($0))%" }
-                chart("Memory", h.id, "mem", limit: t.memPct, top: 100) { "\(Int($0))%" }
-                chart("Root disk", h.id, "disk", limit: t.diskPct, top: 100) { "\(Int($0))%" }
-            } else if let s = m.services.first {
-                chart("Requests/s", s.id, "rps", limit: nil, top: nil) { fmt($0) }
-                chart("Errors", s.id, "err", limit: t.errPct, top: nil) { "\(fmt($0))%" }
-                chart("p99", s.id, "p99", limit: t.p99Ms, top: nil) { fmtMs($0) }
+        HStack(spacing: 0) {
+            if let h = m.host?.server {
+                ring("CPU", h.cpuPct, of: 100, limit: t.cpuPct, text: "\(Int(h.cpuPct))%")
+                ring("Memory", h.memPct, of: 100, limit: t.memPct, text: "\(Int(h.memPct))%")
+                if h.diskPct > 0 { ring("Root disk", h.diskPct, of: 100, limit: t.diskPct, text: "\(Int(h.diskPct))%") }
+                else { ring("Load", h.load15, of: max(h.load15, 1), limit: .infinity, text: fmt(h.load15)) }
+            } else if let s = m.services.first?.server {
+                ring("Requests", s.callRate, of: max(s.callRate, 1), limit: .infinity, text: "\(fmt(s.callRate))/s")
+                ring("Errors", s.errorPct, of: t.errPct, limit: t.errPct, text: "\(fmt(s.errorPct))%")
+                ring("p99", s.p99Ms, of: t.p99Ms, limit: t.p99Ms, text: fmtMs(s.p99Ms))
             }
         }
         .padding(.leading, 19)
     }
 
-    func chart(_ title: String, _ id: String, _ key: String, limit: Double?, top: Double?, label: @escaping (Double) -> String) -> some View {
-        let values = model.hist["\(id)/\(key)"] ?? []
-        let last = values.last ?? 0
-        let sev = limit.map { severity(last, over: $0) } ?? .ok
-        let upper = max(top ?? 0, values.max() ?? 0, limit ?? 0, 0.001)
-        return VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text(title).font(.caption2).foregroundStyle(.secondary)
-                Spacer()
-                Text(values.isEmpty ? "–" : label(last)).font(.caption2).monospacedDigit().foregroundStyle(sev.textColor).fontWeight(sev == .ok ? .regular : .semibold)
-            }
-            MiniChart(values: values, limit: limit, upper: upper, color: sev == .ok ? Color.secondary : sev.color)
-                .frame(height: 36)
-                .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 4))
+    /// `of` is the full circle; `limit` colours it (orange from 80%, red at it). The requests ring is always full and quiet.
+    func ring(_ title: String, _ value: Double, of full: Double, limit: Double, text: String) -> some View {
+        let sev = limit.isFinite ? severity(value, over: limit) : .ok
+        return VStack(spacing: 4) {
+            Ring(fraction: value / max(full, 0.001), color: sev == .ok ? Color.secondary.opacity(0.6) : sev.color, text: text, textColor: sev.textColor)
+            Text(title).font(.caption2).foregroundStyle(.secondary)
         }
+        .frame(maxWidth: .infinity)
     }
 }
 
-/// Last hour, newest at the right; the line grows in from the right until the buffer is full. Dashed line = limit.
-struct MiniChart: View {
-    let values: [Double]
-    let limit: Double?
-    let upper: Double
+/// Same drawing as SysWatch's ring, smaller.
+struct Ring: View {
+    let fraction: Double
     let color: Color
+    let text: String
+    let textColor: Color
 
     var body: some View {
-        GeometryReader { g in
-            let h = g.size.height, w = g.size.width
-            let y = { (v: Double) in 1.5 + (h - 3) * (1 - CGFloat(min(max(v, 0), upper) / upper)) }
-            if let limit {
-                Path { p in p.move(to: CGPoint(x: 0, y: y(limit))); p.addLine(to: CGPoint(x: w, y: y(limit))) }
-                    .stroke(Color.secondary.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
-            }
-            Path { p in
-                guard values.count > 1 else { return }
-                let n = max(values.count, historySamples)
-                for (i, v) in values.enumerated() {
-                    let x = w * CGFloat(i + n - values.count) / CGFloat(n - 1)
-                    if i == 0 { p.move(to: CGPoint(x: x, y: y(v))) } else { p.addLine(to: CGPoint(x: x, y: y(v))) }
-                }
-            }
-            .stroke(color, style: StrokeStyle(lineWidth: 1.5, lineJoin: .round))
+        ZStack {
+            Circle().stroke(Color.secondary.opacity(0.15), lineWidth: 6)
+            Circle().trim(from: 0, to: min(max(fraction, 0), 1))
+                .stroke(color, style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+            Text(text).font(.system(size: 11, weight: .semibold, design: .rounded)).monospacedDigit().foregroundStyle(textColor)
         }
+        .frame(width: 56, height: 56)
     }
 }
 
