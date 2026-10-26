@@ -217,7 +217,7 @@ struct Panel: View {
             Divider()
             Text("Grafana (optional: hosts from its Prometheus datasource)").fontWeight(.semibold)
             TextField("https://grafana.example.com", text: $grafanaURL).textFieldStyle(.roundedBorder)
-            SecureField("Service account token with Viewer role", text: $grafanaKey).textFieldStyle(.roundedBorder)
+            SecureField("Service account token (glsa_…), or your Grafana user:password", text: $grafanaKey).textFieldStyle(.roundedBorder)
                 .onChange(of: grafanaURL) { _, _ in UserDefaults.standard.removeObject(forKey: "grafanaDS") }
             Divider()
             Text("Limits").fontWeight(.semibold)

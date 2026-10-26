@@ -70,6 +70,8 @@ func selfCheck() {
     check(health(warmHost, t, alerts: []).why == "disk 75% full · load 1.3 per core", "80% of the disk and load limits is orange")
     check(Config(url: "https://s", key: "k").grafanaSet == false && Config(url: "https://s", key: "k", gURL: "https://g/", gKey: "t").gBase == "https://g", "grafana config")
 
+    check(grafanaAuth("glsa_abc") == "Bearer glsa_abc" && grafanaAuth("rishav:p:w") == "Basic cmlzaGF2OnA6dw==", "token → Bearer, user:password → Basic")
+
     check(labelText(unhealthy: 0, hasData: true, error: nil) == "OK", "label when all healthy")
     check(labelText(unhealthy: 2, hasData: true, error: "x") == "2", "label shows the count even when the last poll failed")
     check(labelText(unhealthy: 0, hasData: false, error: "x") == "?", "label before any data")

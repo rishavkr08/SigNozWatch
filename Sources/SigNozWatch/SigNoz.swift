@@ -309,6 +309,11 @@ func mergeHosts(_ results: [String: [(labels: [String: String], value: Double)]]
     return hosts.values.sorted { $0.name < $1.name }
 }
 
+/// Service-account tokens start with "glsa_" and need an org Admin to create; anyone can use their own "user:password" instead.
+func grafanaAuth(_ key: String) -> String {
+    key.hasPrefix("glsa_") || !key.contains(":") ? "Bearer " + key : "Basic " + Data(key.utf8).base64EncodedString()
+}
+
 struct GrafanaClient {
     let config: Config
 
@@ -339,7 +344,7 @@ struct GrafanaClient {
 
     private func send(_ path: String) async throws -> Data {
         var r = URLRequest(url: URL(string: config.gBase + path) ?? URL(fileURLWithPath: "/"), timeoutInterval: 20)
-        r.setValue("Bearer " + config.gKey, forHTTPHeaderField: "Authorization")
+        r.setValue(grafanaAuth(config.gKey), forHTTPHeaderField: "Authorization")
         let (data, resp) = try await URLSession.shared.data(for: r)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         guard code == 200 else {
