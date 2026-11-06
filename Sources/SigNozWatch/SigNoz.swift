@@ -61,6 +61,7 @@ struct Server: Identifiable {
     var id: String { kind == .service ? "service:\(service)@\(name)" : "host:\(name)" }
     // service, over the window
     var callRate = 0.0, numCalls = 0, numErrors = 0, errorPct = 0.0, p99Ms = 0.0
+    var latencyLabel = "p99"   // "avg" for the Rails exporter, which has no service-wide p99
     // host (SigNoz infra agent, or Grafana's Prometheus node exporter)
     var cpuPct = 0.0, memPct = 0.0, load15 = 0.0, os = ""
     var diskPct = 0.0, loadPerCore = 0.0, staleSec = 0.0   // Grafana only
@@ -85,14 +86,18 @@ struct Alert: Identifiable {
     let env: String        // label from the rule, "" when it has none
     let state: String      // firing / inactive / disabled
     let detail: String     // annotations.description
-    let text: String       // name + condition, used to match a server by name
+    let text: String       // name + condition + active-instance labels, used to match a machine by name
+    var source = "SigNoz"  // or "Grafana"
+    var link = ""          // absolute URL for Grafana rules; SigNoz rules use `path`
     var firing: Bool { state == "firing" }
     var sev: Severity { severity == "critical" ? .bad : .warn }
-    var path: String { "/alerts/overview?ruleId=\(id)" }
-    // ponytail: rules carry no service label here, so a rule belongs to a machine when its name or query mentions
-    // the machine or its service, and the rule's env label (if any) is that machine's environment.
+    var path: String { link.isEmpty ? "/alerts/overview?ruleId=\(id)" : link }
+    // ponytail: rules carry no machine label, so a rule belongs to a machine when its name, query or firing instances
+    // mention the machine, its short label or its service, and the rule's env label (if any) is that machine's environment.
     func matches(_ s: Server) -> Bool {
-        (env.isEmpty || s.env.isEmpty || env == s.env) && [s.name, s.service].contains { !$0.isEmpty && text.range(of: $0, options: .caseInsensitive) != nil }
+        let label = s.os.components(separatedBy: " · ").first ?? ""
+        return (env.isEmpty || s.env.isEmpty || env == s.env)
+            && [s.name, s.service, label.count > 2 ? label : ""].contains { !$0.isEmpty && text.range(of: $0, options: .caseInsensitive) != nil }
     }
 }
 
@@ -152,6 +157,38 @@ extension Machine {
         let label = host?.server.os.components(separatedBy: " · ").first ?? ""
         return map[name.lowercased()] ?? (label.isEmpty ? nil : map[label.lowercased()])
     }
+}
+
+/// Rails exporter rows attach to the machine whose listed IP the exporter's host name resolves to (the exporter only
+/// knows "admin.thrillophilia.com:9394"); a machine that already has SigNoz traces keeps those instead.
+func attachRails(_ rails: [Server], to servers: [Server], ips: [String: String], resolve: (String) -> String?) -> [Server] {
+    rails.compactMap { r in
+        var row = r
+        if let ip = resolve(r.name), let host = ips.first(where: { $0.value == ip })?.key,
+           let machine = servers.first(where: { $0.name.lowercased() == host || $0.os.lowercased().hasPrefix(host + " ") }) {
+            row = Server(kind: .service, name: machine.name, service: r.service, env: r.env)
+            row.callRate = r.callRate; row.numCalls = r.numCalls; row.numErrors = r.numErrors; row.errorPct = r.errorPct
+            row.p99Ms = r.p99Ms; row.latencyLabel = r.latencyLabel
+        }
+        return servers.contains { $0.kind == .service && $0.name == row.name } ? nil : row
+    }
+}
+
+private var dnsCache: [String: String?] = [:]
+/// IPv4 lookup, remembered for the app's lifetime (the exporter host names don't change).
+func resolveHost(_ host: String) -> String? {
+    if let cached = dnsCache[host] { return cached }
+    var hints = addrinfo(ai_flags: 0, ai_family: AF_INET, ai_socktype: SOCK_STREAM, ai_protocol: 0, ai_addrlen: 0, ai_canonname: nil, ai_addr: nil, ai_next: nil)
+    var res: UnsafeMutablePointer<addrinfo>?
+    var ip: String?
+    if getaddrinfo(host, nil, &hints, &res) == 0, let a = res?.pointee.ai_addr {
+        var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        a.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { var addr = $0.pointee.sin_addr; inet_ntop(AF_INET, &addr, &buf, socklen_t(buf.count)) }
+        ip = String(cString: buf)
+    }
+    freeaddrinfo(res)
+    dnsCache[host] = ip
+    return ip
 }
 
 let categoryOrder = ["App servers", "Web & UI", "Data stores", "Tooling", "Staging", "Other"]
@@ -346,6 +383,49 @@ struct SigNozClient {
     }
 }
 
+extension Parse {
+    /// GET /api/prometheus/grafana/api/v1/rules → Grafana-managed rules with state, severity label and firing instances.
+    static func grafanaRules(_ data: Data, base: String) throws -> [Alert] {
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let groups = (root["data"] as? [String: Any])?["groups"] as? [[String: Any]] else { throw APIError(message: "grafana rules: unexpected JSON") }
+        return groups.flatMap { ($0["rules"] as? [[String: Any]]) ?? [] }.compactMap { r in
+            guard let uid = r["uid"] as? String, let name = r["name"] as? String else { return nil }
+            let labels = r["labels"] as? [String: String] ?? [:]
+            let ann = r["annotations"] as? [String: String] ?? [:]
+            let instances = (r["alerts"] as? [[String: Any]] ?? []).compactMap { ($0["labels"] as? [String: String])?.values.joined(separator: " ") }
+            let paused = r["isPaused"] as? Bool ?? false
+            return Alert(id: uid, name: name, severity: labels["severity"] ?? "warning", env: labels["env"] ?? "",
+                         state: paused ? "disabled" : (r["state"] as? String ?? "inactive"),
+                         detail: ann["summary"] ?? ann["description"] ?? "",
+                         text: ([name, String(describing: r["query"] ?? "")] + instances).joined(separator: " "),
+                         source: "Grafana", link: base + "/alerting/grafana/\(uid)/view")
+        }
+    }
+
+    /// Rails exporter (job="rails_app") per instance: requests/s, 5xx %, average latency. The machine is the instance's host part.
+    static func railsRows(rps: [(labels: [String: String], value: Double)], err: [(labels: [String: String], value: Double)],
+                          latency: [(labels: [String: String], value: Double)], windowSec: Double = Double(windowMinutes * 60)) -> [Server] {
+        func by(_ rows: [(labels: [String: String], value: Double)]) -> [String: Double] {
+            Dictionary(rows.compactMap { r in r.labels["instance"].map { ($0, r.value) } }, uniquingKeysWith: { a, _ in a })
+        }
+        let e = by(err), l = by(latency)
+        return by(rps).map { instance, rate in
+            var s = Server(kind: .service, name: String(instance.split(separator: ":").first ?? Substring(instance)), service: "rails_app", env: "production")
+            s.callRate = rate; s.numCalls = Int(rate * windowSec)
+            s.errorPct = e[instance] ?? 0; s.numErrors = Int(Double(s.numCalls) * s.errorPct / 100)
+            s.p99Ms = l[instance] ?? 0; s.latencyLabel = "avg"
+            return s
+        }.sorted { $0.name < $1.name }
+    }
+}
+
+/// Rails exporter (prometheus_exporter :9394) over the same window: the Partners API's own request health.
+let railsQueries: [String: String] = [
+    "rps": #"sum by (instance)(rate(http_requests_total{job="rails_app"}[15m]))"#,
+    "err": #"100 * sum by (instance)(rate(http_requests_total{job="rails_app",status=~"5.."}[15m])) / sum by (instance)(rate(http_requests_total{job="rails_app"}[15m]))"#,
+    "latency": #"1000 * sum by (instance)(rate(http_request_duration_seconds_sum{job="rails_app"}[15m])) / sum by (instance)(rate(http_request_duration_seconds_count{job="rails_app"}[15m]))"#,
+]
+
 // MARK: - Grafana (Prometheus through the datasource proxy)
 
 /// Node-exporter queries, by (instance, server); `server` is Alloy's short name. `stale` catches a host that stopped pushing
@@ -386,21 +466,32 @@ func grafanaAuth(_ key: String) -> String {
 
 struct GrafanaClient {
     let config: Config
+    struct Result { var hosts: [Server] = [], rails: [Server] = [], alerts: [Alert] = [] }
 
-    func hosts() async throws -> [Server] {
+    /// Hosts (node exporter), the Rails exporter's request health, and Grafana's own alert rules, all in one go.
+    func fetch() async throws -> Result {
         let uid = try await datasourceUID()
         var results: [String: [(labels: [String: String], value: Double)]] = [:]
+        var rulesData = Data()
         try await withThrowingTaskGroup(of: (String, Data).self) { group in
-            for (name, expr) in prometheusQueries {
+            for (name, expr) in prometheusQueries.merging(railsQueries) { a, _ in a } {
                 group.addTask {
                     let q = expr.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? expr
                     return (name, try await send("/api/datasources/proxy/uid/\(uid)/api/v1/query?query=\(q)"))
                 }
             }
-            for try await (name, data) in group { results[name] = try Parse.prometheus(data) }
+            group.addTask { ("rules", try await send("/api/prometheus/grafana/api/v1/rules")) }
+            for try await (name, data) in group {
+                if name == "rules" { rulesData = data } else { results[name] = try Parse.prometheus(data) }
+            }
         }
-        return mergeHosts(results, link: config.gBase + "/d/infra-fleet")
+        let hostResults = results.filter { prometheusQueries[$0.key] != nil }
+        return Result(hosts: mergeHosts(hostResults, link: config.gBase + "/d/infra-fleet"),
+                      rails: Parse.railsRows(rps: results["rps"] ?? [], err: results["err"] ?? [], latency: results["latency"] ?? []),
+                      alerts: try Parse.grafanaRules(rulesData, base: config.gBase))
     }
+
+    func hosts() async throws -> [Server] { try await fetch().hosts }
 
     /// The first Prometheus datasource, looked up once and remembered.
     func datasourceUID() async throws -> String {

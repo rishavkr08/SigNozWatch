@@ -182,8 +182,8 @@
           <code id="cmd">curl -fsSL https://github.com/rishavkr08/SigNozWatch/releases/latest/download/install.sh | sh</code>
           <button class="copy" id="copy" type="button">Copy</button>
         </div>
-        <p class="hint">Open Terminal: press <kbd>⌘</kbd> <kbd>Space</kbd>, type <strong>Terminal</strong> and press Return. Paste the command and press Return. It installs SigNozWatch to Applications and opens it, with no security warning. Run it again any time to update. Then open <strong>Settings…</strong> in the panel and paste your SigNoz API key.</p>
-        <p class="meta">Version 1.0.3 · macOS 14 Sonoma or later · Apple silicon and Intel · 1 MB</p>
+        <p class="hint">Open Terminal: press <kbd>⌘</kbd> <kbd>Space</kbd>, type <strong>Terminal</strong> and press Return. Paste the command and press Return. It installs SigNozWatch to Applications and opens it, with no security warning. Run it again any time to update. Then open <strong>Settings…</strong> in the panel and paste your Grafana login.</p>
+        <p class="meta">Version 1.1.0 · macOS 14 Sonoma or later · Apple silicon and Intel · 1 MB</p>
 
         <p class="or alt">Or download the app</p>
         <a class="btn secondary" href="https://github.com/rishavkr08/SigNozWatch/releases/latest/download/SigNozWatch.dmg">
@@ -225,10 +225,10 @@
     <section aria-labelledby="what">
       <h2 id="what">What it does</h2>
       <div class="grid">
-        <div class="card"><h3>One row per machine</h3><p>Services from SigNoz traces and hosts from Grafana's Prometheus merge into one row each: requests, error rate, p99, CPU, memory, root disk and load, with three rings underneath.</p></div>
+        <div class="card"><h3>One row per machine</h3><p>Hosts and the Rails exporter from Grafana's Prometheus, plus SigNoz traces when you have them, merge into one row each: requests, error rate, latency, CPU, memory, root disk and load, with three rings underneath.</p></div>
         <div class="card"><h3>Grouped by role</h3><p>Tabs for app servers, web and UI, data stores, tooling and staging, each counting its unhealthy machines. The menu bar dot shows the worst of them all.</p></div>
         <div class="card"><h3>Red, orange, green</h3><p>Orange within 80% of a limit or when a warning rule fires, red over a limit, on a critical rule, or when a machine stops reporting. Limits are yours to set in the panel.</p></div>
-        <div class="card"><h3>Alerts that wait for you</h3><p>A notification when a machine turns red or a SigNoz rule starts firing, once per cooldown. Click it to open that machine in SigNoz or Grafana.</p></div>
+        <div class="card"><h3>Alerts that wait for you</h3><p>A notification when a machine turns red or a Grafana or SigNoz rule starts firing, once per cooldown. Click it to open that machine or rule.</p></div>
       </div>
     </section>
 
@@ -238,7 +238,7 @@
         <li><span>Open <strong>SigNozWatch.dmg</strong> and drag SigNozWatch into the Applications folder.</span></li>
         <li><span>Open SigNozWatch from Applications. A dot appears in the menu bar.</span></li>
         <li><span>When macOS asks whether SigNozWatch may send notifications, click <strong>Allow</strong>. In System Settings › Notifications, set its style to <strong>Alerts</strong> so they stay until you close them.</span></li>
-        <li><span>Click the dot, open <strong>Settings…</strong> and paste your SigNoz URL and API key (SigNoz › Settings › API Keys, Viewer role). Optionally add your Grafana URL with a service-account token or your own <code>user:password</code>.</span></li>
+        <li><span>Click the dot, open <strong>Settings…</strong> and paste your Grafana URL with a service-account token or your own <code>user:password</code>. Optionally add a SigNoz URL and API key (SigNoz › Settings › API Keys, Viewer role) for trace health per machine.</span></li>
         <li><span>Tick <strong>Launch at login</strong> in the panel's footer.</span></li>
       </ol>
       <div class="note">

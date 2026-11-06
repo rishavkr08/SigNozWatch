@@ -26,7 +26,8 @@ final class Model: ObservableObject {
     @Published var fetching = false
     @Published var events: [AlertEvent] = []
     @Published var known: [String] = UserDefaults.standard.stringArray(forKey: "knownServers") ?? []
-    private var lastSigNoz: [Server] = [], lastGrafana: [Server] = [], lastAlerts: [Alert] = []   // last good answer per source
+    private var lastSigNoz: [Server] = [], lastSigNozAlerts: [Alert] = []                // last good answer per source
+    private var lastGrafana = GrafanaClient.Result()
     let alerter = Alerter()
     private var timer: Timer?
 
@@ -61,22 +62,26 @@ final class Model: ObservableObject {
     func tick() { Task { await refresh() } }
 
     /// Each source fails on its own: a bad Grafana token must not blank the SigNoz rows or mark them missing.
+    /// Grafana is the primary source, SigNoz optional; each fails on its own and keeps its last good answer.
     func refresh() async {
         let c = Config.load()
-        guard c.isSet else { snap.error = "Set the SigNoz URL and API key under Settings"; return }
+        guard c.grafanaSet || c.isSet else { snap.error = "Add a Grafana login (or a SigNoz key) under Settings"; return }
         if fetching { return }
         fetching = true
         defer { fetching = false }
-        let signoz = Task { try await SigNozClient(config: c).fetch() }
-        let grafana = Task { c.grafanaSet ? try await GrafanaClient(config: c).hosts() : [] }
+        let grafana = Task { c.grafanaSet ? try await GrafanaClient(config: c).fetch() : GrafanaClient.Result() }
+        let signoz = Task { c.isSet ? try await SigNozClient(config: c).fetch() : (servers: [Server](), alerts: [Alert]()) }
         var errors: [String] = []
-        do { let r = try await signoz.value; lastSigNoz = r.servers; lastAlerts = r.alerts } catch { errors.append("SigNoz: \(error.localizedDescription)") }
         do { lastGrafana = try await grafana.value } catch { errors.append("Grafana: \(error.localizedDescription)") }
-        if errors.count == 2 && snap.servers.isEmpty { snap.error = errors.joined(separator: "\n"); return }
-        let fresh = lastSigNoz.filter { s in !lastGrafana.contains { $0.id == s.id } } + lastGrafana   // same host in both: Grafana has more
+        do { let r = try await signoz.value; lastSigNoz = r.servers; lastSigNozAlerts = r.alerts } catch { errors.append("SigNoz: \(error.localizedDescription)") }
+        let configured = (c.grafanaSet ? 1 : 0) + (c.isSet ? 1 : 0)
+        if errors.count == configured && snap.servers.isEmpty { snap.error = errors.joined(separator: "\n"); return }
+        let rails = attachRails(lastGrafana.rails, to: lastSigNoz + lastGrafana.hosts, ips: ipMap(UserDefaults.standard.string(forKey: "serverIPs") ?? ""), resolve: resolveHost)
+        let fresh = lastSigNoz.filter { s in !lastGrafana.hosts.contains { $0.id == s.id } } + lastGrafana.hosts + rails   // same host in both: Grafana has more
         known = Array(Set(known).union(fresh.map(\.id))).sorted()
         UserDefaults.standard.set(known, forKey: "knownServers")
-        snap = Snapshot(servers: merge(fresh, known: known), alerts: lastAlerts, date: Date(), error: errors.isEmpty ? nil : errors.joined(separator: "\n"))
+        snap = Snapshot(servers: merge(fresh, known: known), alerts: lastGrafana.alerts + lastSigNozAlerts, date: Date(),
+                        error: errors.isEmpty ? nil : errors.joined(separator: "\n"))
         alerter.check(rows, firing: firing, thresholds)
     }
 
@@ -87,7 +92,8 @@ final class Model: ObservableObject {
     }
 
     func open(_ path: String) {
-        if let u = URL(string: path.hasPrefix("http") ? path : Config.load().base + path) { NSWorkspace.shared.open(u) }
+        let c = Config.load()
+        if let u = URL(string: path.hasPrefix("http") ? path : (c.isSet ? c.base : c.gBase) + path) { NSWorkspace.shared.open(u) }
     }
 }
 
@@ -141,18 +147,27 @@ func pollOnce() -> Never {
     Task {
         let c = Config.load()
         do {
-            var (servers, alerts) = try await SigNozClient(config: c).fetch()
-            if c.grafanaSet { servers += try await GrafanaClient(config: c).hosts() } else { print("Grafana: not configured") }
+            var servers: [Server] = [], alerts: [Alert] = []
+            if c.grafanaSet {
+                let g = try await GrafanaClient(config: c).fetch()
+                servers += g.hosts; alerts += g.alerts
+                if c.isSet {
+                    do { let r = try await SigNozClient(config: c).fetch(); servers += r.servers; alerts += r.alerts }
+                    catch { print("SigNoz: \(error.localizedDescription)") }
+                } else { print("SigNoz: not configured") }
+                servers += attachRails(g.rails, to: servers, ips: ipMap(UserDefaults.standard.string(forKey: "serverIPs") ?? ""), resolve: resolveHost)
+            } else { print("Grafana: not configured") }
             let rows = servers.map { Row(server: $0, health: health($0, .load(), alerts: alerts)) }
             for (cat, ms) in categorised(machines(rows)) {
                 print("== \(cat)")
                 for m in ms {
-                    let parts = m.services.map { "\($0.server.service)/\($0.server.env): \(fmt($0.server.callRate))/s, \($0.server.numErrors) errors (\(fmt($0.server.errorPct))%), p99 \(fmtMs($0.server.p99Ms))" }
+                    let parts = m.services.map { "\($0.server.service)/\($0.server.env): \(fmt($0.server.callRate))/s, \($0.server.numErrors) errors (\(fmt($0.server.errorPct))%), \($0.server.latencyLabel) \(fmtMs($0.server.p99Ms))" }
                         + (m.host.map { h in ["host: cpu \(Int(h.server.cpuPct))%, mem \(Int(h.server.memPct))%, disk \(Int(h.server.diskPct))%, load/core \(fmt(h.server.loadPerCore)), stale \(Int(h.server.staleSec))s [\(h.server.os)]"] } ?? [])
                     print("\(m.sev) \(m.name): " + parts.joined(separator: " | ") + (m.why.isEmpty ? "" : " — \(m.why)"))
                 }
             }
-            for a in alerts { print("\(a.state) alert (\(a.severity)): \(a.name)") }
+            for a in alerts where a.firing { print("firing \(a.source) alert (\(a.severity)): \(a.name)") }
+            print("\(alerts.filter { !$0.firing }.count) quiet rules")
         } catch { print("error: \(error.localizedDescription)") }
         exit(0)
     }
@@ -196,7 +211,7 @@ struct Panel: View {
                         Label(e, systemImage: "exclamationmark.triangle").font(.callout).foregroundStyle(.orange).lineLimit(3)
                     }
                     // Settings take the place of the tab content, so opening or closing them never resizes the window.
-                    if showSettings || url.isEmpty || key.isEmpty {
+                    if showSettings || (url.isEmpty || key.isEmpty) && (grafanaURL.isEmpty || grafanaKey.isEmpty) {
                         settingsCard
                     } else if model.machines.isEmpty && model.snap.error == nil {
                         Card { Text("No machine sent traces or host metrics in the last \(windowMinutes) min").font(.callout).foregroundStyle(.secondary) }
@@ -233,7 +248,8 @@ struct Panel: View {
                     (Text("updated ") + Text(model.snap.date, style: .relative) + Text(" ago")).font(.caption).foregroundStyle(.secondary)
                 }
                 Button { model.tick() } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(.plain).help("Refresh now")
-                Button("Open SigNoz") { model.open("/") }.buttonStyle(.link).font(.callout)
+                if !grafanaURL.isEmpty { Button("Grafana") { model.open(Config.load().gBase + "/") }.buttonStyle(.link).font(.callout) }
+                if !url.isEmpty { Button("SigNoz") { model.open(Config.load().base + "/") }.buttonStyle(.link).font(.callout) }
             }
             Picker("", selection: Binding(get: { current }, set: { tab = $0 })) {
                 ForEach(tabs, id: \.self) { t in
@@ -247,17 +263,16 @@ struct Panel: View {
 
     var settingsCard: some View {
         Card {
-            Text("SigNoz").fontWeight(.semibold)
-            TextField("https://signoz.example.com", text: $url).textFieldStyle(.roundedBorder)
-            // ponytail: SecureField in the menu bar window keeps the pasted text out of the binding; a plain field saves it.
-            TextField("API key (Settings › API Keys in SigNoz)", text: $key).textFieldStyle(.roundedBorder).font(.system(.caption, design: .monospaced))
-            Text("Stored in this app's preferences only. Prefilled from the SigNoz MCP server in ~/.claude.json when present.")
-                .font(.caption2).foregroundStyle(.secondary)
-            Divider()
-            Text("Grafana (optional: hosts from its Prometheus datasource)").fontWeight(.semibold)
+            Text("Grafana").fontWeight(.semibold)
             TextField("https://grafana.example.com", text: $grafanaURL).textFieldStyle(.roundedBorder)
             TextField("Service account token (glsa_…), or your Grafana user:password", text: $grafanaKey).textFieldStyle(.roundedBorder).font(.system(.caption, design: .monospaced))
                 .onChange(of: grafanaURL) { _, _ in UserDefaults.standard.removeObject(forKey: "grafanaDS") }
+            Text("Hosts from its Prometheus datasource, the Rails exporter's request health, and its alert rules.").font(.caption2).foregroundStyle(.secondary)
+            Divider()
+            Text("SigNoz (optional: trace health per machine and its alert rules)").fontWeight(.semibold)
+            TextField("https://signoz.example.com", text: $url).textFieldStyle(.roundedBorder)
+            TextField("API key (Settings › API Keys in SigNoz)", text: $key).textFieldStyle(.roundedBorder).font(.system(.caption, design: .monospaced))
+            Text("Keys stay in this app's preferences. Prefilled from the SigNoz MCP server in ~/.claude.json when present.").font(.caption2).foregroundStyle(.secondary)
             Divider()
             Text("Server IPs").fontWeight(.semibold)
             // ponytail: TextEditor, not a multi-line TextField: the latter dropped pasted text in this window.
@@ -384,7 +399,7 @@ struct MachineRow: View {
                             if m.services.count > 1 { Text(s.service).font(.caption2).foregroundStyle(.secondary).lineLimit(1) }
                             metric("\(fmt(s.callRate))/s", .ok, width: 58)
                             metric("\(fmt(s.errorPct))% err", severity(s.errorPct, over: t.errPct), width: 64)
-                            metric("p99 \(fmtMs(s.p99Ms))", severity(s.p99Ms, over: t.p99Ms), width: 80)
+                            metric("\(s.latencyLabel) \(fmtMs(s.p99Ms))", severity(s.p99Ms, over: t.p99Ms), width: 80)
                         }
                     }
                     if let h = m.host?.server {
@@ -435,7 +450,7 @@ struct MachineRings: View {
             } else if let s = m.services.first?.server {
                 ring("Requests", s.callRate, of: max(s.callRate, 1), limit: .infinity, text: "\(fmt(s.callRate))/s")
                 ring("Errors", s.errorPct, of: t.errPct, limit: t.errPct, text: "\(fmt(s.errorPct))%")
-                ring("p99", s.p99Ms, of: t.p99Ms, limit: t.p99Ms, text: fmtMs(s.p99Ms))
+                ring(s.latencyLabel == "avg" ? "Avg latency" : "p99", s.p99Ms, of: t.p99Ms, limit: t.p99Ms, text: fmtMs(s.p99Ms))
             }
         }
         .padding(.leading, 19)
@@ -481,7 +496,7 @@ struct AlertsCard: View {
         let quiet = rules.filter { !$0.firing }
         Card {
             HStack {
-                Text("SigNoz alerts").fontWeight(.semibold)
+                Text("Alerts").fontWeight(.semibold)
                 Spacer()
                 Text(rules.isEmpty ? "" : "\(model.firing.count) firing · \(quiet.count) quiet").font(.caption).foregroundStyle(.secondary)
             }
@@ -491,7 +506,7 @@ struct AlertsCard: View {
                     Circle().fill(a.sev.color).frame(width: 9, height: 9)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(a.name).fontWeight(.semibold).lineLimit(1)
-                        Text(a.detail.isEmpty ? "\(a.severity) · firing" : a.detail).font(.caption2).foregroundStyle(a.sev.color).lineLimit(2)
+                        Text("\(a.source) · \(a.severity)" + (a.detail.isEmpty ? "" : " · \(a.detail)")).font(.caption2).foregroundStyle(a.sev.color).lineLimit(2)
                     }
                     Spacer()
                     Button { model.open(a.path) } label: { Image(systemName: "arrow.up.right.square") }

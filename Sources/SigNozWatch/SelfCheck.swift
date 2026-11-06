@@ -93,6 +93,29 @@ func selfCheck() {
           && ms.first { $0.name == "thrillophilia-admin-server" }?.ip(in: ips) == "10.0.0.20"
           && ms.first { $0.name == "thrillo-prod-redis-server" }?.ip(in: ips) == nil, "ip by hostname, by Grafana label, or none")
 
+    let grules = Data(#"""
+    {"status":"success","data":{"groups":[{"name":"infra","rules":[
+     {"uid":"host-down","name":"Host down — a server stopped reporting","state":"firing","labels":{"severity":"critical"},"annotations":{"summary":"ui-2 stopped reporting"},"query":"time() - timestamp(up)","alerts":[{"labels":{"server":"ui-2","instance":"thrillo-prod-ui-server-3"},"state":"Alerting"}]},
+     {"uid":"delivery-test","name":"Delivery test","state":"inactive","isPaused":true,"labels":{"severity":"warning"},"annotations":{},"query":"vector(1)","alerts":[]}]}]}}
+    """#.utf8)
+    guard let ga = try? Parse.grafanaRules(grules, base: "https://g.example") else { check(false, "grafana rules parse threw"); return }
+    check(ga.count == 2 && ga[0].firing && ga[0].sev == .bad && ga[0].source == "Grafana" && ga[0].path == "https://g.example/alerting/grafana/host-down/view"
+          && ga[0].detail == "ui-2 stopped reporting" && ga[1].state == "disabled", "grafana rules parse")
+    check(ga[0].matches(Server(kind: .host, name: "thrillo-prod-ui-server-3", os: "ui-2 · Grafana")) && !ga[0].matches(gh[0]), "grafana rule matched by its firing instance labels")
+    let rr = Parse.railsRows(rps: [(labels: ["instance": "admin.thrillophilia.com:9394"], value: 10)], err: [(labels: ["instance": "admin.thrillophilia.com:9394"], value: 0.5)],
+                             latency: [(labels: ["instance": "admin.thrillophilia.com:9394"], value: 180)], windowSec: 900)
+    check(rr.count == 1 && rr[0].name == "admin.thrillophilia.com" && rr[0].service == "rails_app" && rr[0].numCalls == 9000 && rr[0].numErrors == 45
+          && rr[0].p99Ms == 180 && rr[0].latencyLabel == "avg", "rails exporter rows")
+
+    let fakeDNS = { (h: String) -> String? in h == "admin.thrillophilia.com" ? "10.0.0.12" : nil }
+    var partnersHost = Server(kind: .host, name: "thrillo-partners-prod-app-server-3", os: "admin · Grafana")
+    partnersHost.cpuPct = 10
+    let attached = attachRails(rr, to: [partnersHost], ips: ["thrillo-partners-prod-app-server-3": "10.0.0.12"], resolve: fakeDNS)
+    check(attached.count == 1 && attached[0].name == "thrillo-partners-prod-app-server-3" && attached[0].service == "rails_app" && attached[0].p99Ms == 180, "exporter row attached to the machine its IP matches")
+    check(attachRails(rr, to: [sv[1]], ips: ["thrillo-partners-prod-app-server-3": "10.0.0.12"], resolve: fakeDNS).isEmpty, "exporter row dropped when the machine already has traces")
+    check(attachRails(rr, to: [partnersHost], ips: [:], resolve: fakeDNS)[0].name == "admin.thrillophilia.com", "unmatched exporter row stays its own machine")
+    check(attachRails(rr, to: [partnersHost], ips: ["admin": "10.0.0.12"], resolve: fakeDNS)[0].name == "thrillo-partners-prod-app-server-3", "match by Grafana short label works too")
+
     check(labelText(unhealthy: 0, hasData: true, error: nil) == "OK", "label when all healthy")
     check(labelText(unhealthy: 2, hasData: true, error: "x") == "2", "label shows the count even when the last poll failed")
     check(labelText(unhealthy: 0, hasData: false, error: "x") == "?", "label before any data")
